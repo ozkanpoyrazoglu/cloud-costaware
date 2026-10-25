@@ -1,5 +1,6 @@
 {
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "costaware",
-  "description": "Cloud Costaware for AWS. Classifies AWS CLI commands, boto3 scripts and AWS MCP calls by cost before they run; expensive or size-dependent calls need the user's approval."
+  "description": "Cloud Costaware for AWS. Classifies AWS CLI commands, boto3 scripts and AWS MCP calls by cost before they run; expensive or size-dependent calls need the user's approval.",
+  "license": "Apache-2.0"
 }

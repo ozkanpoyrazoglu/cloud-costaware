@@ -3,6 +3,8 @@ name = "costaware"
 version = "0.1.0"
 description = "Cloud Costaware for AWS: a pre-execution cost gate for AWS calls made by AI coding agents"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 dependencies = []
 
@@ -10,7 +12,7 @@ dependencies = []
 costaware = "costaware.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
