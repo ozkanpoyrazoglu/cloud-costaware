@@ -1,0 +1,20 @@
+[project]
+name = "costaware"
+version = "0.1.0"
+description = "Cloud Costaware for AWS: a pre-execution cost gate for AWS calls made by AI coding agents"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+costaware = "costaware.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+costaware = ["rules/*.json"]

@@ -1,0 +1,10 @@
+{
+  "costaware": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [{"type": "command", "command": "python3 hooks/pretooluse.py", "timeout": 10}]
+      }
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "cloud-costaware",
+  "owner": {
+    "name": "ozkanpoyrazoglu"
+  },
+  "metadata": {
+    "description": "Cloud Costaware for AWS: cost gate for AWS calls made by AI coding agents."
+  },
+  "plugins": [
+    {
+      "name": "costaware",
+      "source": ".",
+      "description": "Cloud Costaware for AWS. Cost gate for AWS calls made by Claude: FREE runs, LOW informs, HIGH/UNKNOWN asks first."
+    }
+  ]
+}
