@@ -44,6 +44,8 @@ def format_text(result: Result) -> str:
         lines.append(f"          {describe(item)}")
         if item.details:
             lines.append(f"          {' · '.join(item.details)}")
+        if item.price:
+            lines.append(f"          {item.price}")
         if item.note:
             lines.append(f"          {item.note}")
         if item.confidence != "high":

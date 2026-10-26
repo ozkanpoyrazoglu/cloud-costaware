@@ -191,7 +191,8 @@ The CLI takes `--config settings.json`. The hook reads the user's config from `C
 {
   "high_monthly_usd": 1.0,
   "high_one_time_usd": 1.0,
-  "unknown_service_read": "UNKNOWN"
+  "unknown_service_read": "UNKNOWN",
+  "price_lookup": true
 }
 ```
 
@@ -200,15 +201,32 @@ The CLI takes `--config settings.json`. The hook reads the user's config from `C
   - LOW: alarm ($0.10), secret ($0.40)
 - `high_one_time_usd`: one-time cost at or above this is HIGH.
 - `unknown_service_read`: level for `describe-`/`list-`/`get-` calls of services missing from the rule table. The safe default is `UNKNOWN`. Set it to `LOW` if it asks too often.
+- `price_lookup`: look up list prices for the confirmation (see below). Only the user-level file can change it.
 
 A `.costaware.json` in the project root is applied on top, but only where it makes the gate stricter (lower thresholds, a stricter `unknown_service_read`). The agent can write to its workspace, so a project file must not be able to switch the gate off; loosening it takes the user-level file.
 
 The hook also honours `COSTAWARE_RULES` to point at an alternative rule table.
 
+### Price lookup
+
+For a HIGH or UNKNOWN call whose price depends on its arguments, the hook asks the AWS Price List API for the on-demand list price and adds it to the confirmation:
+
+```
+- [HIGH] ec2 run-instances · recurring cost · eu-central-1
+  instance-type=m5.2xlarge · max-count=1 · volume-size=30 · volume-type=gp3
+  Price List (on-demand Linux, eu-central-1): $0.46/hour → ~$336/month + EBS 30 GB gp3 ~$2.86/month
+```
+
+- Covered: `ec2 run-instances` (instance type × count, plus EBS volumes in `--block-device-mappings` that state size and type), `ec2 create-volume`, and `rds create-db-instance` for PostgreSQL, MySQL and MariaDB (instance hours only).
+- It runs `aws pricing get-products` with the local AWS CLI and your credentials. The API is free and needs `pricing:GetProducts`.
+- Results are cached for a day in `~/.cache/costaware/prices/` (override with `COSTAWARE_CACHE_DIR`). Each query has a 6-second timeout, and queries run at the same time.
+- The price is never used to lower the level. If the CLI is missing, credentials or network are unavailable, a query times out or several products match, the line is left out.
+- The figure is the on-demand list price: Spot, Reserved Instances and Savings Plans aren't included, and the AMI's OS (Windows, RHEL) can change the EC2 price. When a call doesn't name a region, `AWS_REGION`/`AWS_DEFAULT_REGION` is used, else us-east-1 (and the line says so).
+
 ## Layout
 
 ```
-src/costaware/          package: shell parser, Python analyzer (pyscan), classifier, report, CLI, hook
+src/costaware/          package: shell parser, Python analyzer (pyscan), classifier, price lookup, report, CLI, hook
 src/costaware/rules/    rule table
 .claude-plugin/         Claude Code plugin and marketplace manifests
 hooks/                  Claude Code hook config (hooks.json) and the shared hook entry point

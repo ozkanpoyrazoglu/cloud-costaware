@@ -29,6 +29,7 @@ from pathlib import Path
 from .classifier import (DEFAULT_CONFIG, LEVELS, Classification, Result, classify_command, classify_operation,
                          classify_python, load_rules, max_level)
 from .parser import is_plain_aws
+from .pricing import annotate
 from .report import headline
 
 ASK_LEVELS = {"HIGH", "UNKNOWN"}
@@ -225,6 +226,8 @@ def classify_tool_call(call: ToolCall, env: dict) -> Result:
         result = classify_mcp_input(call.name, call.input, rules, config)
     else:
         result = Result("FREE")
+    if config.get("price_lookup") is True and result.level in ASK_LEVELS:
+        annotate(result.items, env)
     if touches_approvals(call, env):
         item = Classification("HIGH", "unknown", None, None, rule="approval-state", command="<tool call>",
                               note="The call touches costaware's approvals. Only the user can approve a call.")
@@ -239,6 +242,8 @@ def summarize(result: Result) -> str:
         lines.append(f"- [{item.level}] {headline(item, locate=len(shown) > 1)}")
         if item.details:
             lines.append(f"  {' · '.join(item.details)}")
+        if item.price:
+            lines.append(f"  {item.price}")
         if item.note:
             lines.append(f"  {item.note}")
         if item.confidence != "high":

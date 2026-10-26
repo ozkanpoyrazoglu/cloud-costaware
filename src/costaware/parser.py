@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -360,3 +361,27 @@ def find_python_sources(command: str) -> list[PythonSource]:
                 sources.append(PythonSource("file", token))
                 break
     return sources
+
+
+def argument_fields(value: str, key: str) -> list[str]:
+    """Values of `key` anywhere in an argument given as JSON, or as CLI shorthand (`Ebs={VolumeSize=30}`)."""
+    try:
+        data = json.loads(value)
+    except ValueError:
+        pattern = rf"(?:^|[,{{\s]){re.escape(key)}=([^,}}\]\s]+)"
+        return re.findall(pattern, value, flags=re.IGNORECASE)
+    return _find_key(data, key.lower())
+
+
+def _find_key(node, key: str) -> list[str]:
+    if isinstance(node, list):
+        return [leaf for item in node for leaf in _find_key(item, key)]
+    if not isinstance(node, dict):
+        return []
+    found = []
+    for name, item in node.items():
+        if name.lower() == key and not isinstance(item, (dict, list)):
+            found.append(item if isinstance(item, str) else json.dumps(item))
+        else:
+            found += _find_key(item, key)
+    return found

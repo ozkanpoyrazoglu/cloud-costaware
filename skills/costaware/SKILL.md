@@ -55,6 +55,8 @@ Rules for the estimate:
 
 ### Looking up the price
 
+For EC2 instances, EBS volumes and RDS instances (PostgreSQL, MySQL, MariaDB) the hook looks the price up itself and adds a `Price List (...)` line to the confirmation; your figure should agree with it. You still say the cost first, since the line is left out when the lookup fails.
+
 When the price depends on an instance type, node type or volume type, get it from the Price List API rather than from memory. `pricing get-products` is free and the gate lets it through. The API is served from `us-east-1` (also `eu-central-1`, `ap-south-1`); `regionCode` selects the region being priced.
 
 ```bash

@@ -3,7 +3,7 @@
     "PreToolUse": [
       {
         "matcher": ".*",
-        "hooks": [{"type": "command", "command": "python3 hooks/pretooluse.py", "timeout": 10}]
+        "hooks": [{"type": "command", "command": "python3 hooks/pretooluse.py", "timeout": 20}]
       }
     ]
   }

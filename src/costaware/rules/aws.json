@@ -5,6 +5,7 @@
     "cost: free | request (small per-request fee) | usage (~$0 while idle, pay as you use) |",
     "      recurring (costs money even while idle; monthly_usd) | one_time (usd) | variable (size-dependent, needs an estimate)",
     "when: {\"--flag\": true|false|\"value\"|[\"values\"]}; use the @ prefix for derived facts such as \"@direction\".",
+    "price: estimator that looks up the on-demand list price for the confirmation (ec2 | ebs | rds, see pricing.py).",
     "show: arguments to list in the confirmation, e.g. [\"--instance-type\", \"--block-device-mappings.VolumeSize\"] (a field inside a JSON/shorthand argument).",
     "Prices are approximate us-east-1 list prices. Rules with confidence: low need verification."
   ],
@@ -30,6 +31,7 @@
         {"op": "*", "when": {"--dry-run": true}, "cost": "free", "note": "--dry-run only checks permissions."},
         {"op": ["run-instances", "run-scheduled-instances", "request-spot-instances", "request-spot-fleet", "create-fleet"],
          "cost": "recurring", "note": "Instances are billed hourly while running; EBS volumes are billed separately per GB-month.",
+         "price": "ec2",
          "show": ["--instance-type", "--count", "--max-count", "--instance-count", "--spot-price",
                   "--block-device-mappings.VolumeSize", "--block-device-mappings.VolumeType",
                   "--target-capacity-specification.TotalTargetCapacity"]},
@@ -40,7 +42,7 @@
         {"op": "allocate-address", "cost": "recurring", "monthly_usd": 3.65,
          "note": "Public IPv4 address $0.005/hour (~$3.65/month), attached to a resource or not."},
         {"op": "create-volume", "cost": "recurring", "note": "EBS volumes are billed per GB-month (gp3 ~$0.08/GB-month), even when unattached.",
-         "show": ["--size", "--volume-type", "--iops", "--throughput"]},
+         "price": "ebs", "show": ["--size", "--volume-type", "--iops", "--throughput"]},
         {"op": "modify-volume", "cost": "recurring", "note": "Increasing volume size/IOPS raises the monthly cost.",
          "show": ["--size", "--volume-type", "--iops", "--throughput"]},
         {"op": "modify-instance-attribute", "when": {"--instance-type": true}, "cost": "recurring",
@@ -216,7 +218,7 @@
                 "restore-db-cluster-*", "start-db-instance", "start-db-cluster", "create-db-proxy",
                 "create-blue-green-deployment", "create-global-cluster", "modify-db-instance", "modify-db-cluster"],
          "cost": "recurring", "note": "Hourly by instance class + storage per GB-month. Multi-AZ doubles the cost.",
-         "show": ["--engine", "--db-instance-class", "--multi-az", "--allocated-storage", "--storage-type", "--iops"]},
+         "price": "rds", "show": ["--engine", "--db-instance-class", "--multi-az", "--allocated-storage", "--storage-type", "--iops"]},
         {"op": ["create-db-snapshot", "create-db-cluster-snapshot", "copy-db-snapshot", "copy-db-cluster-snapshot"],
          "cost": "recurring", "note": "Manual snapshot storage is billed per GB-month."}
       ],

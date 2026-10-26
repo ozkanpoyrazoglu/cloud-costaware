@@ -11,8 +11,9 @@ from fnmatch import fnmatchcase
 from importlib import resources
 from pathlib import Path
 
-from .parser import (CLI_WORD, S3_HIGH_LEVEL, AwsCall, ParseError, find_aws_calls, find_python_sources,
-                     split_heredocs, to_cli_name)
+from .parser import (CLI_WORD, S3_HIGH_LEVEL, AwsCall, ParseError, argument_fields, find_aws_calls,
+                     find_python_sources, split_heredocs, to_cli_name)
+from .pricing import price_inputs
 from .pyscan import find_boto3_calls
 
 # Severity order used when several calls are combined into one decision.
@@ -25,6 +26,8 @@ DEFAULT_CONFIG = {
     "high_one_time_usd": 1.0,
     # Level for read operations (describe-/list-/get-...) of services missing from the rule table.
     "unknown_service_read": "UNKNOWN",
+    # Look up on-demand prices with the local AWS CLI (Price List API) for the confirmation prompt.
+    "price_lookup": True,
 }
 
 # `aws <service> <operation>` written anywhere, used when text can't be parsed as shell.
@@ -55,6 +58,8 @@ class Classification:
     command: str = ""
     details: list[str] = field(default_factory=list)  # cost-relevant arguments, e.g. "instance-type=m5.2xlarge"
     location: str = ""  # where the call is in a script, e.g. "line 3"
+    pricing: dict = field(default_factory=dict)  # what the rule's price estimator needs (see pricing.py)
+    price: str = ""  # the looked-up list price, set by the hook
 
 
 @dataclass
@@ -121,30 +126,6 @@ def _level_for(cost: str, rule: dict, config: dict) -> str:
     return "UNKNOWN"  # "variable" and anything unrecognised
 
 
-def _leaves(value: str, key: str) -> list[str]:
-    """Values of `key` anywhere in an argument given as JSON, or as CLI shorthand (`Ebs={VolumeSize=30}`)."""
-    try:
-        data = json.loads(value)
-    except ValueError:
-        pattern = rf"(?:^|[,{{\s]){re.escape(key)}=([^,}}\]\s]+)"
-        return re.findall(pattern, value, flags=re.IGNORECASE)
-    return _find_key(data, key.lower())
-
-
-def _find_key(node, key: str) -> list[str]:
-    if isinstance(node, list):
-        return [leaf for item in node for leaf in _find_key(item, key)]
-    if not isinstance(node, dict):
-        return []
-    found = []
-    for name, item in node.items():
-        if name.lower() == key and not isinstance(item, (dict, list)):
-            found.append(item if isinstance(item, str) else json.dumps(item))
-        else:
-            found += _find_key(item, key)
-    return found
-
-
 def _clip(text: str, limit: int = 40) -> str:
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
@@ -159,7 +140,7 @@ def _details(call: AwsCall, show: list[str]) -> list[str]:
         if values is None:
             continue
         if key:
-            values = [leaf for value in values for leaf in _leaves(value, key)]
+            values = [leaf for value in values for leaf in argument_fields(value, key)]
             if values:
                 details.append(f"{to_cli_name(key)}={_clip(','.join(values))}")
         else:
@@ -182,6 +163,7 @@ def _from_rule(call: AwsCall, rule: dict, rule_name: str, config: dict) -> Class
         confidence=rule.get("confidence", "high"),
         command=call.raw,
         details=_details(call, rule.get("show", [])),
+        pricing=price_inputs(rule.get("price"), call),
     )
 
 
