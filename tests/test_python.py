@@ -185,8 +185,19 @@ class ShellPythonTest(unittest.TestCase):
                          "HIGH")
         self.assertEqual(classify_command("ssh bastion <<EOF\naws ec2 allocate-address\nEOF").level, "HIGH")
         self.assertEqual(classify_command("bash <<EOF\necho it's\naws ec2 allocate-address\nEOF").level, "UNKNOWN")
-        # Plain text that merely mentions aws is not a command.
-        self.assertEqual(classify_command("cat > notes.md <<'EOF'\nDon't run aws by hand\nEOF").level, "FREE")
+        # Any body might run as shell (ksh, fish, xargs...), so an unparsable one that mentions aws fails closed.
+        self.assertEqual(classify_command("ksh <<EOF\necho it's\naws ec2 allocate-address\nEOF").level, "UNKNOWN")
+        self.assertEqual(classify_command("cat > notes.md <<'EOF'\nDon't touch AWS\nEOF").level, "FREE")
+
+    def test_heredoc_belongs_to_its_own_command(self):
+        # A Python/shell polyglot fed to bash, with python3 elsewhere on the line, still runs `aws`.
+        polyglot = '""":"\naws ec2 allocate-address\n":"""'
+        self.assertEqual(classify_command(f"echo python3; bash <<EOF\n{polyglot}\nEOF").level, "HIGH")
+        # A `<<` inside quotes is not a heredoc; the lines after it are commands.
+        self.assertEqual(classify_command(f'echo "python3 <<X"\n{polyglot}\nX').level, "HIGH")
+        # Genuine Python mentioning aws in comments or strings stays quiet.
+        script = "import boto3\n# don't call aws by hand\nprint(\"it's aws\")\nboto3.client('ec2').describe_instances()"
+        self.assertEqual(classify_command(f"cat <<EOF | python3\n{script}\nEOF").level, "FREE")
 
     def test_heredoc_piped_into_python(self):
         command = "cat <<EOF | python3\nimport boto3\nboto3.client('ec2').allocate_address()\nEOF"

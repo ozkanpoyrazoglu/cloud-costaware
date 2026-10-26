@@ -266,41 +266,44 @@ HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1([^\n]*)\n(.*
 
 @dataclass
 class PythonSource:
-    kind: str  # "inline" (-c or heredoc) or "file"
+    kind: str  # "inline" (-c), "heredoc" or "file"
     value: str  # the code, or the script path
 
 
-@dataclass
-class Heredoc:
-    body: str
-    executed: bool  # fed to a shell (`bash <<EOF`, `cat <<EOF | sh`, `ssh host <<EOF`), not just data
+# Separators between commands in a list; a pipeline (`|`) stays together.
+LIST_SEPARATORS = re.compile(r"&&|\|\||[;&\n]")
 
 
-# Programs that run a heredoc's body as shell commands.
-SHELL_READERS = SHELLS | {"ssh", "eval", "source"}
+def _feeds_python(pipeline: str) -> bool:
+    """Whether any command in the pipeline that owns a heredoc is a Python interpreter."""
+    for command in pipeline.split("|"):
+        words = _strip_prefix(command.split())
+        if words and PYTHON.match(words[0].rsplit("/", 1)[-1]):
+            return True
+    return False
 
 
-def split_heredocs(command: str) -> tuple[str, list[PythonSource], list[Heredoc]]:
+def split_heredocs(command: str) -> tuple[str, list[PythonSource], list[str]]:
     """Pull every heredoc body out of the command.
 
     Returns the command without the bodies, so quotes or Python syntax in a body can't confuse the shell
-    parser, plus the bodies fed to a Python interpreter and the other bodies.
+    parser, plus the bodies fed to a Python interpreter (`python3 - <<EOF`, `cat <<EOF | python3`) and the
+    other bodies, which the caller reads as shell.
     """
     sources: list[PythonSource] = []
-    heredocs: list[Heredoc] = []
+    others: list[str] = []
 
     def replace(match: re.Match) -> str:
-        # The reader can come before the heredoc (`python3 - <<EOF`) or after it (`cat <<EOF | python3`).
         line_start = command.rfind("\n", 0, match.start()) + 1
-        line = command[line_start:match.start()] + " " + match.group(3)
-        words = {w.rsplit("/", 1)[-1] for w in re.split(r"[\s;|&()<>]+", line)}
-        if any(PYTHON.match(w) for w in words):
-            sources.append(PythonSource("inline", match.group(4)))
+        before = LIST_SEPARATORS.split(command[line_start:match.start()])[-1]
+        after = LIST_SEPARATORS.split(match.group(3))[0]
+        if _feeds_python(before + " " + after):
+            sources.append(PythonSource("heredoc", match.group(4)))
         else:
-            heredocs.append(Heredoc(match.group(4), executed=bool(words & SHELL_READERS)))
+            others.append(match.group(4))
         return match.group(3)
 
-    return HEREDOC.sub(replace, command), sources, heredocs
+    return HEREDOC.sub(replace, command), sources, others
 
 
 # Environment assignments that can't change what an `aws` call executes or which credentials it reads.

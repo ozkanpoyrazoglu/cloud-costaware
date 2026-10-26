@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from fnmatch import fnmatchcase
 from importlib import resources
@@ -177,14 +178,13 @@ def classify_command(command: str, rules: dict | None = None, config: dict | Non
         if "aws" in shell:
             items.append(Classification("UNKNOWN", "unknown", None, None, rule="parse-error", command=command,
                                         note=f"Could not parse the command: {exc}"))
-    for heredoc in heredocs:
-        # Bodies fed to a shell must parse (classify_command fails closed); a data body only counts when it
-        # reads cleanly as commands, since an apostrophe in plain text isn't a parse problem.
-        result = classify_command(heredoc.body, rules, config, cwd)
-        if heredoc.executed or not any(i.rule == "parse-error" for i in result.items):
-            items += result.items
+    for body in heredocs:
+        # Whatever reads it (bash, ssh, ksh, cat...), a body that may run `aws` must parse.
+        items += classify_command(body, rules, config, cwd).items
     for source in find_python_sources(command):
-        if source.kind == "inline":
+        if source.kind == "heredoc":
+            items += _scan_lines_as_shell(source.value, rules, config)
+        if source.kind in ("inline", "heredoc"):
             items += _classify_inline(source.value, rules, config, cwd)
             continue
         path = os.path.join(cwd or os.getcwd(), os.path.expanduser(source.value))
@@ -205,6 +205,21 @@ def _classify_inline(code: str, rules: dict, config: dict | None, cwd: str | Non
     except (SyntaxError, ValueError):
         return classify_command(code, rules, config, cwd).items
     return classify_python(code, rules, config).items
+
+
+def _scan_lines_as_shell(code: str, rules: dict, config: dict | None) -> list[Classification]:
+    """Look for `aws` commands in each line of a heredoc taken as Python, in case the body really runs as shell
+    (a Python/shell polyglot, or a `<<` the regex found inside quotes). Real Python rarely has an `aws ...` line
+    or an unbalanced quote next to the word aws, so this costs nothing on genuine scripts."""
+    items = []
+    for line in code.splitlines():
+        try:
+            items += [classify_call(call, rules, config) for call in find_aws_calls(line)]
+        except ParseError as exc:
+            if re.search(r"\baws\b", line):
+                items.append(Classification("UNKNOWN", "unknown", None, None, rule="parse-error", command=line.strip(),
+                                            note=f"Could not parse this heredoc line as shell or Python: {exc}"))
+    return items
 
 
 def _worst_conditional_level(rules: dict, config: dict | None, service: str | None, operation: str | None) -> str:
