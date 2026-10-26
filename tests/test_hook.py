@@ -66,9 +66,33 @@ class McpHookTest(unittest.TestCase):
         code = 'import boto3\nec2 = boto3.client("ec2")\nec2.create_nat_gateway(SubnetId="s")'
         response = run(mcp("mcp__aws-mcp__aws___run_script", code=code), {})
         self.assertEqual(decision(response), "ask")
-        self.assertIn("ec2.create_nat_gateway", response["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("ec2 create-nat-gateway", response["hookSpecificOutput"]["permissionDecisionReason"])
         code = 'import boto3\nboto3.client("ec2").describe_instances()'
         self.assertIsNone(run(mcp("mcp__aws-mcp__aws___run_script", code=code), {}))
+
+    def test_prompt_lists_cost_arguments_instead_of_code(self):
+        code = ('resp = await call_boto3(service_name="ec2", operation_name="RunInstances", region_name="eu-central-1",'
+                ' params={"ImageId": "ami-1", "InstanceType": "m5.2xlarge", "MinCount": 1, "MaxCount": 1,'
+                ' "BlockDeviceMappings": [{"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 30, "VolumeType": "gp3"}}]})')
+        reason = run(mcp("mcp__aws-mcp__aws___run_script", code=code), {})["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertEqual(reason.splitlines()[1:3], [
+            "- [HIGH] ec2 run-instances · recurring cost · eu-central-1",
+            "  instance-type=m5.2xlarge · max-count=1 · volume-size=30 · volume-type=gp3",
+        ])
+        self.assertNotIn("ami-1", reason)
+
+    def test_prompt_locates_calls_only_when_there_are_several(self):
+        code = 'import boto3\nec2 = boto3.client("ec2")\nec2.create_nat_gateway(SubnetId="s")'
+        reason = run(mcp("mcp__aws-mcp__aws___run_script", code=code), {})["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertNotIn("line 3", reason)
+        code += '\nec2.allocate_address()'
+        reason = run(mcp("mcp__aws-mcp__aws___run_script", code=code), {})["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("ec2 create-nat-gateway · recurring cost · ~$32.85/month (line 3)", reason)
+        self.assertIn("(line 4)", reason)
+
+    def test_prompt_shows_code_of_unresolved_calls(self):
+        response = run(mcp("mcp__aws-mcp__aws___run_script", code="clients['eks'].create_cluster(name='c')"), {})
+        self.assertIn("clients['eks'].create_cluster(name='c')", response["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_script_tool_with_unresolved_client(self):
         # In an AWS tool, a costly-looking call on an unknown object is treated as UNKNOWN.
@@ -194,7 +218,7 @@ class AntigravityHookTest(unittest.TestCase):
                               Arguments={"code": code})
         response = run(payload, {})
         self.assertEqual(response["decision"], "deny")
-        self.assertIn("CreateNatGateway", response["reason"])
+        self.assertIn("ec2 create-nat-gateway", response["reason"])
         payload["toolCall"]["args"]["Arguments"] = json.dumps({"code": code})
         self.assertEqual(run(payload, {})["decision"], "deny")
         payload["toolCall"]["args"]["Arguments"] = {"code": 'await call_boto3(service_name="ec2", operation_name="DescribeVpcs")'}

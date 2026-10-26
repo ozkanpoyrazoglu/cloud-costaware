@@ -123,5 +123,33 @@ class ClassifyOperationTest(unittest.TestCase):
         self.assertEqual(classify_operation("dynamodb", "CreateTable", {"BillingMode": "PROVISIONED"}).level, "HIGH")
 
 
+class DetailsTest(unittest.TestCase):
+    def details(self, command):
+        return [d for item in classify_command(command).items for d in item.details]
+
+    def test_plain_and_flag_arguments(self):
+        self.assertEqual(self.details("aws rds create-db-instance --db-instance-identifier d --engine postgres"
+                                      " --db-instance-class db.r6g.large --multi-az --allocated-storage 100"),
+                         ["engine=postgres", "db-instance-class=db.r6g.large", "multi-az", "allocated-storage=100"])
+
+    def test_fields_inside_json_and_shorthand_arguments(self):
+        json_arg = """aws ec2 run-instances --instance-type t3.micro --block-device-mappings '[{"Ebs": {"VolumeSize": 30}}]'"""
+        self.assertEqual(self.details(json_arg), ["instance-type=t3.micro", "volume-size=30"])
+        shorthand = "aws ec2 run-instances --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=100,VolumeType=gp3}'"
+        self.assertEqual(self.details(shorthand), ["volume-size=100", "volume-type=gp3"])
+        self.assertEqual(self.details("aws ec2 run-instances --block-device-mappings file://bdm.json"), [])
+
+    def test_api_params(self):
+        item = classify_operation("eks", "CreateNodegroup", {"instanceTypes": ["m5.large", "m5.xlarge"],
+                                                             "scalingConfig": {"desiredSize": 3, "maxSize": 6}}).items[0]
+        self.assertEqual(item.details, ["instance-types=m5.large,m5.xlarge", "desired-size=3", "max-size=6"])
+
+    def test_long_values_are_clipped(self):
+        ids = " ".join(f"i-{n:017d}" for n in range(5))
+        [detail] = self.details(f"aws ec2 start-instances --instance-ids {ids}")
+        self.assertEqual(len(detail), len("instance-ids=") + 40)
+        self.assertTrue(detail.endswith("..."))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -53,6 +53,8 @@ class Classification:
     rule: str = ""
     confidence: str = "high"
     command: str = ""
+    details: list[str] = field(default_factory=list)  # cost-relevant arguments, e.g. "instance-type=m5.2xlarge"
+    location: str = ""  # where the call is in a script, e.g. "line 3"
 
 
 @dataclass
@@ -119,6 +121,52 @@ def _level_for(cost: str, rule: dict, config: dict) -> str:
     return "UNKNOWN"  # "variable" and anything unrecognised
 
 
+def _leaves(value: str, key: str) -> list[str]:
+    """Values of `key` anywhere in an argument given as JSON, or as CLI shorthand (`Ebs={VolumeSize=30}`)."""
+    try:
+        data = json.loads(value)
+    except ValueError:
+        pattern = rf"(?:^|[,{{\s]){re.escape(key)}=([^,}}\]\s]+)"
+        return re.findall(pattern, value, flags=re.IGNORECASE)
+    return _find_key(data, key.lower())
+
+
+def _find_key(node, key: str) -> list[str]:
+    if isinstance(node, list):
+        return [leaf for item in node for leaf in _find_key(item, key)]
+    if not isinstance(node, dict):
+        return []
+    found = []
+    for name, item in node.items():
+        if name.lower() == key and not isinstance(item, (dict, list)):
+            found.append(item if isinstance(item, str) else json.dumps(item))
+        else:
+            found += _find_key(item, key)
+    return found
+
+
+def _clip(text: str, limit: int = 40) -> str:
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _details(call: AwsCall, show: list[str]) -> list[str]:
+    """The arguments a rule's "show" names: "--instance-type", or "--block-device-mappings.VolumeSize" for a field
+    inside a structured argument."""
+    details = []
+    for spec in show:
+        option, _, key = spec.partition(".")
+        values = call.options.get(option)
+        if values is None:
+            continue
+        if key:
+            values = [leaf for value in values for leaf in _leaves(value, key)]
+            if values:
+                details.append(f"{to_cli_name(key)}={_clip(','.join(values))}")
+        else:
+            details.append(f"{option[2:]}={_clip(','.join(values))}" if values else option[2:])
+    return details
+
+
 def _from_rule(call: AwsCall, rule: dict, rule_name: str, config: dict) -> Classification:
     cost = rule.get("cost", "variable")
     return Classification(
@@ -133,6 +181,7 @@ def _from_rule(call: AwsCall, rule: dict, rule_name: str, config: dict) -> Class
         rule=rule_name,
         confidence=rule.get("confidence", "high"),
         command=call.raw,
+        details=_details(call, rule.get("show", [])),
     )
 
 
@@ -269,7 +318,7 @@ def classify_python(code: str, rules: dict | None = None, config: dict | None = 
             continue
         operation = to_cli_name(call.operation).replace("_", "-")  # CreateNatGateway or create_nat_gateway
         item = classify_operation(call.service, operation, call.params, rules, config).items[0]
-        item.command, item.region = command, call.region
+        item.command, item.region, item.location = command, call.region, f"{label} line {call.line}".lstrip()
         worst = _worst_conditional_level(rules, config, item.service, item.operation) if call.dynamic_params else "FREE"
         if LEVELS.index(worst) > LEVELS.index(item.level):
             item.level, item.confidence = worst, "low"
@@ -277,6 +326,11 @@ def classify_python(code: str, rules: dict | None = None, config: dict | None = 
                          " assuming the costliest case.").strip()
         items.append(item)
     return Result(max_level(i.level for i in items), items)
+
+
+def _option_text(value) -> str:
+    """An API parameter value as the CLI would take it (structured values as JSON)."""
+    return json.dumps(value) if isinstance(value, (dict, list)) else str(value)
 
 
 def classify_operation(service: str, operation: str, params: dict | None = None,
@@ -291,7 +345,7 @@ def classify_operation(service: str, operation: str, params: dict | None = None,
         if value is True:
             options[name] = []
         elif value is not False and value is not None:
-            options[name] = [str(v) for v in value] if isinstance(value, list) else [str(value)]
+            options[name] = [_option_text(v) for v in (value if isinstance(value, list) else [value])]
     call = AwsCall(service, operation, options, raw=f"{service} {operation}")
     item = classify_call(call, rules, config)
     return Result(item.level, [item])

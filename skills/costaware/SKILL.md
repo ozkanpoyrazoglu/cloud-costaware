@@ -49,9 +49,36 @@ Rules for the estimate:
   - EKS: the control plane is $73/month before any node.
   - Interface VPC endpoints: ~$7.3/month per AZ.
   - CloudWatch Logs: retention defaults to forever.
-- **Region matters.** Prices in the rule table are us-east-1; other regions are often 5-20% higher.
+- **Region matters.** Prices in the rule table are us-east-1; other regions are often 5-20% higher. Look up the real price (below) instead of guessing.
 - **Say how to undo it** (the delete/stop command) when the resource keeps billing.
 - If several costly resources are planned (e.g. "set up a VPC with an ALB and RDS"), give one total up front instead of surprising the user call by call.
+
+### Looking up the price
+
+When the price depends on an instance type, node type or volume type, get it from the Price List API rather than from memory. `pricing get-products` is free and the gate lets it through. The API is served from `us-east-1` (also `eu-central-1`, `ap-south-1`); `regionCode` selects the region being priced.
+
+```bash
+# EC2 on-demand Linux, per hour. Without tenancy/preInstalledSw/capacitystatus/licenseModel you get many products.
+aws pricing get-products --region us-east-1 --service-code AmazonEC2 --filters \
+  Type=TERM_MATCH,Field=instanceType,Value=m5.2xlarge Type=TERM_MATCH,Field=regionCode,Value=eu-central-1 \
+  Type=TERM_MATCH,Field=operatingSystem,Value=Linux Type=TERM_MATCH,Field=tenancy,Value=Shared \
+  Type=TERM_MATCH,Field=preInstalledSw,Value=NA Type=TERM_MATCH,Field=capacitystatus,Value=Used \
+  Type=TERM_MATCH,Field=licenseModel,Value="No License required"
+
+# EBS, per GB-month
+aws pricing get-products --region us-east-1 --service-code AmazonEC2 --filters \
+  Type=TERM_MATCH,Field=regionCode,Value=eu-central-1 Type=TERM_MATCH,Field=productFamily,Value=Storage \
+  Type=TERM_MATCH,Field=volumeApiName,Value=gp3
+
+# RDS, per hour (deploymentOption: Single-AZ | Multi-AZ)
+aws pricing get-products --region us-east-1 --service-code AmazonRDS --filters \
+  Type=TERM_MATCH,Field=instanceType,Value=db.r6g.large Type=TERM_MATCH,Field=regionCode,Value=eu-central-1 \
+  Type=TERM_MATCH,Field=databaseEngine,Value=PostgreSQL Type=TERM_MATCH,Field=deploymentOption,Value=Multi-AZ
+```
+
+With the AWS MCP Server, make the same call in `aws___run_script`: `call_boto3(service_name="pricing", operation_name="GetProducts", region_name="us-east-1", params={"ServiceCode": ..., "Filters": [{"Type": "TERM_MATCH", "Field": ..., "Value": ...}]})`.
+
+Each `PriceList` entry is a JSON string; the price is in `terms.OnDemand.*.priceDimensions.*.pricePerUnit.USD`. If a filter matches several products, add filters rather than picking one. For other services, `pricing describe-services --service-code <code>` lists the attribute names and `pricing get-attribute-values` their values. Quote the result as an on-demand list price: it doesn't include Spot, Reserved Instances or Savings Plans, and the AMI's OS (Windows, RHEL) can change the EC2 price.
 
 When the user declines, don't retry the same call or route around the gate (e.g. switching from `aws` CLI to an SDK script or another MCP tool, or hiding the call behind `getattr`). Offer a cheaper alternative if one exists:
 - DynamoDB `PAY_PER_REQUEST` instead of provisioned

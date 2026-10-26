@@ -29,7 +29,7 @@ from pathlib import Path
 from .classifier import (DEFAULT_CONFIG, LEVELS, Classification, Result, classify_command, classify_operation,
                          classify_python, load_rules, max_level)
 from .parser import is_plain_aws
-from .report import describe
+from .report import headline
 
 ASK_LEVELS = {"HIGH", "UNKNOWN"}
 
@@ -234,10 +234,11 @@ def classify_tool_call(call: ToolCall, env: dict) -> Result:
 
 def summarize(result: Result) -> str:
     lines = [f"costaware: {result.level}"]
-    for item in result.items:
-        if item.level == "FREE":
-            continue
-        lines.append(f"- [{item.level}] {item.command}: {describe(item)}")
+    shown = [item for item in result.items if item.level != "FREE"]
+    for item in shown:
+        lines.append(f"- [{item.level}] {headline(item, locate=len(shown) > 1)}")
+        if item.details:
+            lines.append(f"  {' · '.join(item.details)}")
         if item.note:
             lines.append(f"  {item.note}")
         if item.confidence != "high":

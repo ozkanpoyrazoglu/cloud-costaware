@@ -173,6 +173,8 @@ Rules can look at arguments:
 - `dynamodb create-table --billing-mode PAY_PER_REQUEST` is LOW, while the default (PROVISIONED) is HIGH.
 - `s3 cp/sync` tells downloads from uploads.
 
+A rule's `show` lists the arguments that drive the price. The confirmation shows those instead of the raw call, for example `instance-type=m5.2xlarge · max-count=1 · volume-size=30`. `--block-device-mappings.VolumeSize` picks a field out of a JSON or shorthand argument. The call's own text is shown only when its service or operation can't be resolved.
+
 Match order:
 1. service rules
 2. `global_rules` (delete/stop, tagging)
