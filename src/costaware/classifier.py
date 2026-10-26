@@ -11,7 +11,7 @@ from fnmatch import fnmatchcase
 from importlib import resources
 from pathlib import Path
 
-from .parser import (S3_HIGH_LEVEL, AwsCall, ParseError, find_aws_calls, find_python_sources,
+from .parser import (CLI_WORD, S3_HIGH_LEVEL, AwsCall, ParseError, find_aws_calls, find_python_sources,
                      split_heredocs, to_cli_name)
 from .pyscan import find_boto3_calls
 
@@ -26,6 +26,9 @@ DEFAULT_CONFIG = {
     # Level for read operations (describe-/list-/get-...) of services missing from the rule table.
     "unknown_service_read": "UNKNOWN",
 }
+
+# `aws <service> <operation>` written anywhere, used when text can't be parsed as shell.
+AWS_COMMAND_TEXT = re.compile(r"\baws\s+[a-z][a-z0-9-]*\s+[a-z][a-z0-9-]*")
 
 # Scripts larger than this are not read from disk.
 MAX_SCRIPT_BYTES = 1_000_000
@@ -178,13 +181,16 @@ def classify_command(command: str, rules: dict | None = None, config: dict | Non
         if "aws" in shell:
             items.append(Classification("UNKNOWN", "unknown", None, None, rule="parse-error", command=command,
                                         note=f"Could not parse the command: {exc}"))
+    # Heredoc bodies are read as both shell and Python, whoever seems to read them: telling the reader apart
+    # from text is guesswork, so the guess only decides how strict the parse-error handling is.
     for body in heredocs:
-        # Whatever reads it (bash, ssh, ksh, cat...), a body that may run `aws` must parse.
-        items += classify_command(body, rules, config, cwd).items
+        items += classify_command(body, rules, config, cwd).items  # fails closed on unparsable aws text
+        if _is_python(body):
+            items += classify_python(body, rules, config).items
     for source in find_python_sources(command):
-        if source.kind == "heredoc":
-            items += _scan_lines_as_shell(source.value, rules, config)
-        if source.kind in ("inline", "heredoc"):
+        if source.kind == "heredoc" and _is_python(source.value):
+            items += classify_python(source.value, rules, config).items + _shell_view(source.value, rules, config)
+        elif source.kind in ("inline", "heredoc"):
             items += _classify_inline(source.value, rules, config, cwd)
             continue
         path = os.path.join(cwd or os.getcwd(), os.path.expanduser(source.value))
@@ -198,28 +204,33 @@ def classify_command(command: str, rules: dict | None = None, config: dict | Non
 
 
 def _classify_inline(code: str, rules: dict, config: dict | None, cwd: str | None) -> list[Classification]:
-    """Code from `python -c` or a heredoc next to a Python interpreter. If it isn't Python after all (say
-    `python3 -V; bash <<EOF`), read it as shell, so a heredoc can't hide `aws` calls."""
-    try:
-        compile(code, "<script>", "exec", flags=ast.PyCF_ONLY_AST | ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
-    except (SyntaxError, ValueError):
+    """Code from `python -c`, or a heredoc fed to Python. If it isn't Python after all, read it as shell, so
+    it can't hide `aws` calls."""
+    if not _is_python(code):
         return classify_command(code, rules, config, cwd).items
     return classify_python(code, rules, config).items
 
 
-def _scan_lines_as_shell(code: str, rules: dict, config: dict | None) -> list[Classification]:
-    """Look for `aws` commands in each line of a heredoc taken as Python, in case the body really runs as shell
-    (a Python/shell polyglot, or a `<<` the regex found inside quotes). Real Python rarely has an `aws ...` line
-    or an unbalanced quote next to the word aws, so this costs nothing on genuine scripts."""
-    items = []
-    for line in code.splitlines():
-        try:
-            items += [classify_call(call, rules, config) for call in find_aws_calls(line)]
-        except ParseError as exc:
-            if re.search(r"\baws\b", line):
-                items.append(Classification("UNKNOWN", "unknown", None, None, rule="parse-error", command=line.strip(),
-                                            note=f"Could not parse this heredoc line as shell or Python: {exc}"))
-    return items
+def _is_python(code: str) -> bool:
+    try:
+        compile(code, "<script>", "exec", flags=ast.PyCF_ONLY_AST | ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+    except (SyntaxError, ValueError):
+        return False
+    return True
+
+
+def _shell_view(code: str, rules: dict, config: dict | None) -> list[Classification]:
+    """`aws` commands in a heredoc body that compiles as Python, in case it really runs as shell (a polyglot,
+    or a `<<` inside quotes). Python code seldom reads as `aws <service> <operation>`, so genuine scripts stay
+    quiet; if the body doesn't parse as shell, any `aws <word> <word>` text fails closed."""
+    try:
+        calls = find_aws_calls(code)
+    except ParseError as exc:
+        if not AWS_COMMAND_TEXT.search(code):
+            return []
+        return [Classification("UNKNOWN", "unknown", None, None, rule="parse-error", command="<heredoc>",
+                               note=f"The heredoc is valid Python but might run as shell, and has aws text: {exc}")]
+    return [classify_call(call, rules, config) for call in calls if CLI_WORD.match(call.service or "")]
 
 
 def _worst_conditional_level(rules: dict, config: dict | None, service: str | None, operation: str | None) -> str:

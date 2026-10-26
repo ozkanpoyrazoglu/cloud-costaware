@@ -199,6 +199,18 @@ class ShellPythonTest(unittest.TestCase):
         script = "import boto3\n# don't call aws by hand\nprint(\"it's aws\")\nboto3.client('ec2').describe_instances()"
         self.assertEqual(classify_command(f"cat <<EOF | python3\n{script}\nEOF").level, "FREE")
 
+    def test_heredoc_reader_guess_cannot_hide_calls(self):
+        py = "import boto3\nboto3.client('ec2').allocate_address()"
+        for command in [f"python3 - 2>&1 <<EOF\n{py}\nEOF", f"(python3 - <<EOF\n{py}\nEOF\n)",
+                        f"if true; then python3 - <<EOF\n{py}\nEOF\nfi", f"some-runner <<EOF\n{py}\nEOF",
+                        "python3 - <<EOF\necho '\nx'; aws ec2 allocate-address; echo 'y\n'\nEOF"]:
+            self.assertEqual(classify_command(command).level, "HIGH", command)
+
+    def test_genuine_python_heredoc_stays_quiet(self):
+        script = ("import boto3\n# don't\nr = 'arn:aws:iam::1:role/x'\naws = boto3.client('sts')\n"
+                  "aws.get_caller_identity()\nprint(\"it's\")")
+        self.assertEqual(classify_command(f"python3 - <<'PY'\n{script}\nPY").level, "FREE")
+
     def test_heredoc_piped_into_python(self):
         command = "cat <<EOF | python3\nimport boto3\nboto3.client('ec2').allocate_address()\nEOF"
         self.assertEqual(classify_command(command).level, "HIGH")

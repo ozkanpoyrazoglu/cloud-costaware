@@ -270,14 +270,22 @@ class PythonSource:
     value: str  # the code, or the script path
 
 
-# Separators between commands in a list; a pipeline (`|`) stays together.
-LIST_SEPARATORS = re.compile(r"&&|\|\||[;&\n]")
+# Separators between commands in a list; a pipeline (`|`) stays together. `&` in `2>&1` or `&>` is a redirect.
+LIST_SEPARATORS = re.compile(r"&&|\|\||;|\n|(?<![<>])&(?!>)")
+# Shell keywords and punctuation that can come before a command: `(python3 ...)`, `then python3 ...`.
+COMPOUND_PREFIX = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "(", ")", "$("}
 
 
-def _feeds_python(pipeline: str) -> bool:
-    """Whether any command in the pipeline that owns a heredoc is a Python interpreter."""
+def feeds_python(pipeline: str) -> bool:
+    """Whether a command in the pipeline that owns a heredoc is a Python interpreter.
+
+    Only decides how noisy the checks on the body may be: the body is read as both Python and shell anyway.
+    """
     for command in pipeline.split("|"):
-        words = _strip_prefix(command.split())
+        words = [w for w in re.split(r"\s+|(?=[(){}])|(?<=[(){}])", command) if w]
+        while words and (words[0] in COMPOUND_PREFIX or REDIRECT.match(words[0]) or ">" in words[0]):
+            words = words[1:]
+        words = _strip_prefix(words)
         if words and PYTHON.match(words[0].rsplit("/", 1)[-1]):
             return True
     return False
@@ -297,7 +305,7 @@ def split_heredocs(command: str) -> tuple[str, list[PythonSource], list[str]]:
         line_start = command.rfind("\n", 0, match.start()) + 1
         before = LIST_SEPARATORS.split(command[line_start:match.start()])[-1]
         after = LIST_SEPARATORS.split(match.group(3))[0]
-        if _feeds_python(before + " " + after):
+        if feeds_python(before + " " + after):
             sources.append(PythonSource("heredoc", match.group(4)))
         else:
             others.append(match.group(4))
