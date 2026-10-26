@@ -1,6 +1,6 @@
 import unittest
 
-from costaware.parser import find_aws_calls, to_cli_name
+from costaware.parser import find_aws_calls, is_plain_aws, to_cli_name
 
 
 def ops(command):
@@ -23,6 +23,23 @@ class FindAwsCallsTest(unittest.TestCase):
         self.assertEqual(ops("AWS_PROFILE=prod sudo -E aws ec2 describe-vpcs"), [("ec2", "describe-vpcs")])
         self.assertEqual(ops("cat ids | xargs -n1 aws ec2 terminate-instances --instance-ids"),
                          [("ec2", "terminate-instances")])
+
+    def test_wrappers_with_arguments(self):
+        for command in ["sudo -u ops aws ec2 allocate-address", "timeout 60 aws ec2 allocate-address",
+                        "nice -n 5 aws ec2 allocate-address", "aws-vault exec dev -- aws ec2 allocate-address"]:
+            self.assertEqual(ops(command), [("ec2", "allocate-address")], command)
+
+    def test_hash_inside_quotes_or_words_is_not_a_comment(self):
+        [call] = find_aws_calls("aws ec2 create-vpc-endpoint --vpc-id v '#x' --vpc-endpoint-type Interface")
+        self.assertEqual(call.options["--vpc-endpoint-type"], ["Interface"])
+        self.assertEqual(ops("echo a#b && aws s3 ls"), [("s3", "ls")])
+        [call] = find_aws_calls("aws ec2 create-vpc-endpoint --vpc-endpoint-type Gateway # --vpc-endpoint-type Interface")
+        self.assertEqual(call.options["--vpc-endpoint-type"], ["Gateway"])
+
+    def test_ansi_c_quoting_fails_closed(self):
+        from costaware.parser import ParseError
+        with self.assertRaises(ParseError):
+            find_aws_calls("echo $'\\'' ; aws ec2 allocate-address #'")
 
     def test_global_options_before_service(self):
         [call] = find_aws_calls("aws --profile p --region eu-west-1 --no-cli-pager ec2 describe-instances")
@@ -64,6 +81,16 @@ class FindAwsCallsTest(unittest.TestCase):
 
     def test_absolute_aws_path(self):
         self.assertEqual(ops("/usr/local/bin/aws s3 ls"), [("s3", "ls")])
+
+
+class IsPlainAwsTest(unittest.TestCase):
+    def test_only_aws_calls(self):
+        self.assertTrue(is_plain_aws("AWS_PROFILE=x aws s3 ls && aws ec2 allocate-address --region eu-west-1"))
+        for command in ["aws ec2 allocate-address && rm -rf x", "aws s3 ls | sh", "aws s3 ls $(cat x)",
+                        "python3 - <<EOF\nprint(1)\nEOF", "aws s3 ls '", "aws s3 ls > ~/.zshrc",
+                        "LD_PRELOAD=/tmp/x.so aws s3 ls", "AWS_CONFIG_FILE=/tmp/c aws s3 ls",
+                        "sudo aws s3 ls", "/tmp/aws s3 ls"]:
+            self.assertFalse(is_plain_aws(command), command)
 
 
 class ToCliNameTest(unittest.TestCase):

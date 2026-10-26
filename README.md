@@ -30,7 +30,7 @@ If costaware itself fails, for example on a broken config file, calls that menti
 | Agent | HIGH / UNKNOWN | Why |
 |---|---|---|
 | Claude Code | The hook returns `ask`: the normal permission prompt, showing the estimate. It also overrides allow rules such as `Bash(aws:*)` and `bypassPermissions` mode. | Verified live. In non-interactive (`-p`) runs the call is denied. |
-| Antigravity CLI | Chat approval (below). Once approved, the hook returns `auto_approve` so there's no second prompt. | Antigravity's `ask`/`force_ask` decisions are skipped under `--dangerously-skip-permissions` (verified live), and a hook can't tell which mode it runs in. |
+| Antigravity CLI | Chat approval (below). Once approved, a plain `aws` command or an MCP call gets `auto_approve`, so there's no second prompt; anything else (pipes, other programs, scripts) gets `allow`, so the user's own permission rules still apply. | Antigravity's `ask`/`force_ask` decisions are skipped under `--dangerously-skip-permissions` (verified live), and a hook can't tell which mode it runs in. |
 | Codex CLI | Chat approval (below). | Codex hooks can't ask: an `ask` is treated as a hook failure and the call runs. |
 
 **Chat approval:**
@@ -114,6 +114,10 @@ The following are UNKNOWN:
 - Python modules imported by a script are not followed.
 - Scripts that can't be read (missing, larger than 1MB) are skipped.
 
+**Threat model.** costaware guards against an agent that runs a costly call by mistake or without saying what it costs. It is not a sandbox against an agent that sets out to evade it: obfuscated code (`exec`, generated scripts, downloaded tools) can get past any static check. Pair it with least-privilege IAM and AWS Budgets. Within that scope, the gate fails closed: a command it can't parse is UNKNOWN when it mentions `aws`, an `aws` call behind an unknown wrapper (`timeout 60 aws ...`) is still found, and commands that touch the approval phrase or costaware's approval state are HIGH.
+
+In Codex, approvals are kept in `~/.cache/costaware/approvals`, which Codex's default `workspace-write` sandbox can't write to (verified). That sandbox is what keeps the agent from approving its own calls; the text check above is only a tripwire. Under `danger-full-access`, or with `COSTAWARE_STATE_DIR` pointing into the workspace or `/tmp`, the agent could write approvals itself.
+
 ## CLI
 
 ```bash
@@ -179,7 +183,7 @@ Prices are approximate us-east-1 list prices. Rules with `confidence: "low"` nee
 
 ## Configuration
 
-The CLI takes `--config settings.json`. The hook reads `COSTAWARE_CONFIG`, or `.costaware.json` in the project root:
+The CLI takes `--config settings.json`. The hook reads the user's config from `COSTAWARE_CONFIG`, or `~/.config/costaware/config.json` (`$XDG_CONFIG_HOME` is honoured):
 
 ```json
 {
@@ -194,6 +198,8 @@ The CLI takes `--config settings.json`. The hook reads `COSTAWARE_CONFIG`, or `.
   - LOW: alarm ($0.10), secret ($0.40)
 - `high_one_time_usd`: one-time cost at or above this is HIGH.
 - `unknown_service_read`: level for `describe-`/`list-`/`get-` calls of services missing from the rule table. The safe default is `UNKNOWN`. Set it to `LOW` if it asks too often.
+
+A `.costaware.json` in the project root is applied on top, but only where it makes the gate stricter (lower thresholds, a stricter `unknown_service_read`). The agent can write to its workspace, so a project file must not be able to switch the gate off; loosening it takes the user-level file.
 
 The hook also honours `COSTAWARE_RULES` to point at an alternative rule table.
 

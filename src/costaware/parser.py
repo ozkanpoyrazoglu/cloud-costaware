@@ -8,6 +8,10 @@ from dataclasses import dataclass, field
 
 SEPARATORS = {"|", "||", "&", "&&", ";", ";;", "(", ")", "\n"}
 WRAPPERS = {"sudo", "env", "time", "nohup", "exec", "command", "xargs", "watch"}
+# A word that can be an AWS CLI service or operation name, used to spot `aws` behind wrappers we don't know.
+CLI_WORD = re.compile(r"^[a-z][a-z0-9-]*$")
+# Characters after which an unquoted "#" starts a comment.
+WORD_BREAKS = set(" \t\n;|&()<>")
 ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 REDIRECT = re.compile(r"^[0-9]*[<>]+&?$")
 SHELLS = {"sh", "bash", "zsh", "dash"}
@@ -64,8 +68,38 @@ class ParseError(ValueError):
     pass
 
 
+def strip_comments(command: str) -> str:
+    """Remove shell comments: an unquoted "#" at the start of a word, up to the end of the line."""
+    out, quote, i = [], None, 0
+    while i < len(command):
+        char = command[i]
+        if quote:
+            if char == "\\" and quote == '"' and i + 1 < len(command):
+                out.append(command[i:i + 2])
+                i += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char == "\\" and i + 1 < len(command):
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (i == 0 or command[i - 1] in WORD_BREAKS):
+            end = command.find("\n", i)
+            i = len(command) if end == -1 else end
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
 def tokenize(command: str) -> list[str]:
-    command = command.replace("\\\n", " ")
+    if "$'" in command:
+        # ANSI-C quoting ($'it\'s') has escapes neither shlex nor strip_comments model; fail closed.
+        raise ParseError("$'...' quoting is not supported")
+    command = strip_comments(command.replace("\\\n", " "))
     lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
@@ -77,17 +111,12 @@ def tokenize(command: str) -> list[str]:
 
 
 def split_segments(tokens: list[str]) -> list[list[str]]:
-    segments, current, in_comment = [], [], False
+    segments, current = [], []
     for token in tokens:
         if token in SEPARATORS:
-            in_comment = False
             if current:
                 segments.append(current)
             current = []
-        elif in_comment:
-            continue
-        elif token.startswith("#"):
-            in_comment = True
         else:
             current.append(token)
     if current:
@@ -156,9 +185,26 @@ def _parse_args(args: list[str], single_value: bool) -> tuple[dict[str, list[str
     return options, positionals
 
 
+def _is_aws(token: str) -> bool:
+    return token.rsplit("/", 1)[-1] == "aws"
+
+
+def _find_wrapped_aws(segment: list[str]) -> int | None:
+    """Index of an `aws <service> <operation>` behind a wrapper with arguments (`sudo -u x`, `timeout 60`,
+    `aws-vault exec p --`...). Errs on the side of finding one: `echo aws ec2 run-instances` counts too."""
+    for i, token in enumerate(segment[1:], start=1):
+        rest = segment[i + 1:i + 3]
+        if _is_aws(token) and len(rest) == 2 and all(CLI_WORD.match(t) for t in rest):
+            return i
+    return None
+
+
 def parse_aws_segment(segment: list[str]) -> AwsCall | None:
     segment = _strip_prefix(segment)
-    if not segment or segment[0].rsplit("/", 1)[-1] != "aws":
+    if segment and not _is_aws(segment[0]):
+        start = _find_wrapped_aws(segment)
+        segment = segment[start:] if start is not None else []
+    if not segment:
         return None
     args = _strip_redirects(segment[1:])
     raw = shlex.join(["aws", *args])
@@ -224,28 +270,63 @@ class PythonSource:
     value: str  # the code, or the script path
 
 
-def split_python_heredocs(command: str) -> tuple[str, list[PythonSource]]:
-    """Pull heredoc bodies fed to a Python interpreter out of the command.
+@dataclass
+class Heredoc:
+    body: str
+    executed: bool  # fed to a shell (`bash <<EOF`, `cat <<EOF | sh`, `ssh host <<EOF`), not just data
 
-    Returns the command without those bodies (so the shell parser doesn't trip over Python syntax)
-    and the bodies themselves.
+
+# Programs that run a heredoc's body as shell commands.
+SHELL_READERS = SHELLS | {"ssh", "eval", "source"}
+
+
+def split_heredocs(command: str) -> tuple[str, list[PythonSource], list[Heredoc]]:
+    """Pull every heredoc body out of the command.
+
+    Returns the command without the bodies, so quotes or Python syntax in a body can't confuse the shell
+    parser, plus the bodies fed to a Python interpreter and the other bodies.
     """
     sources: list[PythonSource] = []
+    heredocs: list[Heredoc] = []
 
     def replace(match: re.Match) -> str:
+        # The reader can come before the heredoc (`python3 - <<EOF`) or after it (`cat <<EOF | python3`).
         line_start = command.rfind("\n", 0, match.start()) + 1
-        before = command[line_start:match.start()]
-        if not any(PYTHON.match(t.rsplit("/", 1)[-1]) for t in before.split()):
-            return match.group(0)
-        sources.append(PythonSource("inline", match.group(4)))
+        line = command[line_start:match.start()] + " " + match.group(3)
+        words = {w.rsplit("/", 1)[-1] for w in re.split(r"[\s;|&()<>]+", line)}
+        if any(PYTHON.match(w) for w in words):
+            sources.append(PythonSource("inline", match.group(4)))
+        else:
+            heredocs.append(Heredoc(match.group(4), executed=bool(words & SHELL_READERS)))
         return match.group(3)
 
-    return HEREDOC.sub(replace, command), sources
+    return HEREDOC.sub(replace, command), sources, heredocs
+
+
+# Environment assignments that can't change what an `aws` call executes or which credentials it reads.
+SAFE_AWS_ENV = re.compile(r"^(AWS_PROFILE|AWS_REGION|AWS_DEFAULT_REGION|AWS_PAGER|AWS_DEFAULT_OUTPUT)=")
+
+
+def is_plain_aws(command: str) -> bool:
+    """True when the command does nothing but run `aws` CLI calls: no substitutions, heredocs, redirects,
+    wrappers (sudo, env...), other programs, or environment variables beyond region/profile/output."""
+    if SUBSTITUTION.search(command) or "<<" in command:
+        return False
+    try:
+        segments = split_segments(tokenize(command))
+    except ParseError:
+        return False
+    for segment in segments:
+        while segment and SAFE_AWS_ENV.match(segment[0]):
+            segment = segment[1:]
+        if not segment or segment[0] != "aws" or any(c in t for t in segment for c in "<>"):
+            return False
+    return bool(segments)
 
 
 def find_python_sources(command: str) -> list[PythonSource]:
     """Return Python code run by a shell command: `python -c ...`, `python script.py`, heredocs."""
-    command, sources = split_python_heredocs(command)
+    command, sources, _ = split_heredocs(command)
     command = SUBSTITUTION.sub("SUBSTITUTION", command)
     try:
         segments = split_segments(tokenize(command))

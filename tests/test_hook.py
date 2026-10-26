@@ -97,11 +97,25 @@ class ConfigTest(unittest.TestCase):
             response = run(bash("aws ec2 allocate-address"), {"COSTAWARE_CONFIG": str(path)})
         self.assertNotIn("permissionDecision", response["hookSpecificOutput"])
 
-    def test_project_config_file(self):
+    def test_user_config_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, ".costaware.json").write_text(json.dumps({"unknown_service_read": "LOW"}))
-            response = run(bash("aws apigateway get-rest-apis"), {"CLAUDE_PROJECT_DIR": tmp})
+            Path(tmp, "costaware").mkdir()
+            Path(tmp, "costaware", "config.json").write_text(json.dumps({"unknown_service_read": "LOW"}))
+            response = run(bash("aws apigateway get-rest-apis"), {"XDG_CONFIG_HOME": tmp})
         self.assertNotIn("permissionDecision", response["hookSpecificOutput"])
+
+    def test_project_config_can_only_tighten(self):
+        # .costaware.json sits in the agent's workspace, so it can't loosen the gate.
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".costaware.json").write_text(json.dumps({"unknown_service_read": "LOW", "high_monthly_usd": 50}))
+            env = {"CLAUDE_PROJECT_DIR": tmp, "XDG_CONFIG_HOME": tmp}
+            self.assertEqual(decision(run(bash("aws apigateway get-rest-apis"), env)), "ask")
+            self.assertEqual(decision(run(bash("aws ec2 allocate-address"), env)), "ask")
+            Path(tmp, ".costaware.json").write_text(json.dumps({"unknown_service_read": "HIGH"}))
+            Path(tmp, "costaware").mkdir()
+            Path(tmp, "costaware", "config.json").write_text(json.dumps({"unknown_service_read": "LOW"}))
+            response = run(bash("aws apigateway get-rest-apis"), env)
+        self.assertIn("[HIGH]", response["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_broken_config_fails_closed_for_aws_calls(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,9 +202,15 @@ class AntigravityHookTest(unittest.TestCase):
 
     def test_project_config_from_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, ".costaware.json").write_text(json.dumps({"high_monthly_usd": 5.0}))
-            response = run(antigravity("run_command", workspace=tmp, CommandLine="aws ec2 allocate-address"), {})
-        self.assertEqual(response["decision"], "allow")
+            Path(tmp, ".costaware.json").write_text(json.dumps({"high_monthly_usd": 0.0}))
+            response = run(antigravity("run_command", workspace=tmp, CommandLine="aws secretsmanager create-secret --name s"), {})
+        self.assertEqual(response["decision"], "deny")
+
+    def test_approval_skips_the_prompt_only_for_plain_aws_commands(self):
+        command = "aws ec2 create-nat-gateway --subnet-id s && rm -rf build"
+        code = approval_code(run(antigravity("run_command", CommandLine=command), {})["reason"])
+        approved = run(antigravity("run_command", CommandLine=command, user_input=f"costaware approve {code}"), {})
+        self.assertEqual(approved["decision"], "allow")  # the user's own permission rules still apply to `rm`
 
     def test_broken_config_is_denied(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -243,3 +263,10 @@ class CodexHookTest(unittest.TestCase):
         code = approval_code(run(self.tool(command), self.env)["hookSpecificOutput"]["permissionDecisionReason"])
         run(self.tool(f"echo costaware approve {code}"), self.env)
         self.assertEqual(run(self.tool(command), self.env)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_agent_cannot_write_approvals(self):
+        for command in [f"echo costaware approve abc123 > {self.tmp.name}/s1.txt",
+                        "cp a.txt ~/.cache/costaware/approvals/s1.txt"]:
+            output = run(self.tool(command), self.env)["hookSpecificOutput"]
+            self.assertEqual(output["permissionDecision"], "deny")
+            self.assertIn("Only the user can approve", output["permissionDecisionReason"])

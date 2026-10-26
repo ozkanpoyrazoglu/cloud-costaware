@@ -26,8 +26,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .classifier import (Classification, Result, classify_command, classify_operation, classify_python, load_rules,
-                         max_level)
+from .classifier import (DEFAULT_CONFIG, LEVELS, Classification, Result, classify_command, classify_operation,
+                         classify_python, load_rules, max_level)
+from .parser import is_plain_aws
 from .report import describe
 
 ASK_LEVELS = {"HIGH", "UNKNOWN"}
@@ -45,14 +46,38 @@ PROJECT_CONFIG = ".costaware.json"
 APPROVAL = re.compile(r"\bcostaware\s+approve\s+([0-9a-f]{6})\b", re.IGNORECASE)
 
 
-def load_config(env: dict, project_dir: str | None = None) -> dict | None:
-    """COSTAWARE_CONFIG wins, then .costaware.json in the project directory."""
-    path = env.get("COSTAWARE_CONFIG")
+def user_config_path(env: dict) -> Path:
+    if env.get("COSTAWARE_CONFIG"):
+        return Path(env["COSTAWARE_CONFIG"])
+    base = env.get("XDG_CONFIG_HOME") or Path(env.get("HOME") or Path.home()) / ".config"
+    return Path(base) / "costaware" / "config.json"
+
+
+def _stricter(base: dict, project: dict) -> dict:
+    """Apply only the project settings that make the gate stricter."""
+    config = dict(base)
+    for key in ("high_monthly_usd", "high_one_time_usd"):
+        if isinstance(project.get(key), (int, float)):
+            config[key] = min(config[key], project[key])
+    level = project.get("unknown_service_read")
+    if level in LEVELS and LEVELS.index(level) > LEVELS.index(config["unknown_service_read"]):
+        config["unknown_service_read"] = level
+    return config
+
+
+def load_config(env: dict, project_dir: str | None = None) -> dict:
+    """The user's config (COSTAWARE_CONFIG, or ~/.config/costaware/config.json), tightened by .costaware.json.
+
+    The project file lives in the agent's workspace, where the agent can write, so it may only make the gate
+    stricter. Loosening it takes the user-level file.
+    """
+    path = user_config_path(env)
+    config = {**DEFAULT_CONFIG, **(json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {})}
     project_dir = project_dir or env.get("CLAUDE_PROJECT_DIR")
-    if not path and project_dir:
-        candidate = Path(project_dir) / PROJECT_CONFIG
-        path = str(candidate) if candidate.is_file() else None
-    return json.loads(Path(path).read_text(encoding="utf-8")) if path else None
+    project = Path(project_dir) / PROJECT_CONFIG if project_dir else None
+    if project and project.is_file():
+        config = _stricter(config, json.loads(project.read_text(encoding="utf-8")))
+    return config
 
 
 @dataclass
@@ -183,14 +208,28 @@ def classify_mcp_input(tool_name: str, tool_input: dict, rules: dict, config: di
     return Result(max_level(i.level for i in items), items)
 
 
+def touches_approvals(call: ToolCall, env: dict) -> bool:
+    """Whether the call writes the approval phrase or reaches into the approval state (Codex reads approvals
+    from a file, so the agent must not create them itself)."""
+    text = call.shell_command if call.shell_command is not None else json.dumps(call.input)
+    markers = ("costaware/approvals", str(approvals_path("", env).parent))
+    return bool(APPROVAL.search(text)) or any(m in text for m in markers)
+
+
 def classify_tool_call(call: ToolCall, env: dict) -> Result:
     rules = load_rules(env.get("COSTAWARE_RULES"))
     config = load_config(env, call.project_dir)
     if call.shell_command is not None:
-        return classify_command(call.shell_command, rules, config, cwd=call.cwd)
-    if call.external:
-        return classify_mcp_input(call.name, call.input, rules, config)
-    return Result("FREE")
+        result = classify_command(call.shell_command, rules, config, cwd=call.cwd)
+    elif call.external:
+        result = classify_mcp_input(call.name, call.input, rules, config)
+    else:
+        result = Result("FREE")
+    if touches_approvals(call, env):
+        item = Classification("HIGH", "unknown", None, None, rule="approval-state", command="<tool call>",
+                              note="The call touches costaware's approvals. Only the user can approve a call.")
+        result = Result("HIGH", [*result.items, item])
+    return result
 
 
 def summarize(result: Result) -> str:
@@ -225,8 +264,11 @@ def render_antigravity(result: Result, call: ToolCall) -> dict:
     if result.level not in ASK_LEVELS:
         return {"decision": "allow", "reason": summary}
     if call.approved():
-        # The user approved this exact call in chat; don't make them confirm it a second time.
-        return {"decision": "auto_approve", "reason": f"{summary}\nApproved by the user in chat."}
+        # The user approved this exact call in chat. Skip the client's own prompt only when the gate has seen
+        # everything the call does; otherwise (pipes, other programs, scripts) the user's permission rules apply.
+        reason = f"{summary}\nApproved by the user in chat."
+        plain = call.shell_command is None or is_plain_aws(call.shell_command)
+        return {"decision": "auto_approve" if plain else "allow", "reason": reason}
     return {"decision": "deny", "reason": denial_reason(summary, call)}
 
 

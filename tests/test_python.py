@@ -176,6 +176,21 @@ class ShellPythonTest(unittest.TestCase):
 
     def test_heredoc_not_fed_to_python_is_shell(self):
         self.assertEqual(classify_command("bash <<EOF\naws ec2 allocate-address\nEOF").level, "HIGH")
+        # Python elsewhere on the line doesn't turn a shell heredoc into Python.
+        self.assertEqual(classify_command("python3 -V; bash <<EOF\naws ec2 allocate-address\nEOF").level, "HIGH")
+
+    def test_heredoc_bodies_cannot_hide_commands(self):
+        # A quote in a heredoc body must not swallow the commands after it.
+        self.assertEqual(classify_command("cat > notes.txt <<EOF\nwe'll see\nEOF\naws ec2 allocate-address").level,
+                         "HIGH")
+        self.assertEqual(classify_command("ssh bastion <<EOF\naws ec2 allocate-address\nEOF").level, "HIGH")
+        self.assertEqual(classify_command("bash <<EOF\necho it's\naws ec2 allocate-address\nEOF").level, "UNKNOWN")
+        # Plain text that merely mentions aws is not a command.
+        self.assertEqual(classify_command("cat > notes.md <<'EOF'\nDon't run aws by hand\nEOF").level, "FREE")
+
+    def test_heredoc_piped_into_python(self):
+        command = "cat <<EOF | python3\nimport boto3\nboto3.client('ec2').allocate_address()\nEOF"
+        self.assertEqual(classify_command(command).level, "HIGH")
 
     def test_python_dash_c(self):
         command = """python -c "import boto3; boto3.client('ec2').allocate_address()" """

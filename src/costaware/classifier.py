@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 from dataclasses import asdict, dataclass, field
@@ -10,7 +11,7 @@ from importlib import resources
 from pathlib import Path
 
 from .parser import (S3_HIGH_LEVEL, AwsCall, ParseError, find_aws_calls, find_python_sources,
-                     split_python_heredocs, to_cli_name)
+                     split_heredocs, to_cli_name)
 from .pyscan import find_boto3_calls
 
 # Severity order used when several calls are combined into one decision.
@@ -169,16 +170,22 @@ def classify_command(command: str, rules: dict | None = None, config: dict | Non
     """
     rules = rules if rules is not None else load_rules()
     items = []
-    shell, _ = split_python_heredocs(command)
+    shell, _, heredocs = split_heredocs(command)
     try:
         items += [classify_call(call, rules, config) for call in find_aws_calls(shell)]
     except ParseError as exc:
         if "aws" in shell:
             items.append(Classification("UNKNOWN", "unknown", None, None, rule="parse-error", command=command,
                                         note=f"Could not parse the command: {exc}"))
+    for heredoc in heredocs:
+        # Bodies fed to a shell must parse (classify_command fails closed); a data body only counts when it
+        # reads cleanly as commands, since an apostrophe in plain text isn't a parse problem.
+        result = classify_command(heredoc.body, rules, config, cwd)
+        if heredoc.executed or not any(i.rule == "parse-error" for i in result.items):
+            items += result.items
     for source in find_python_sources(command):
         if source.kind == "inline":
-            items += classify_python(source.value, rules, config).items
+            items += _classify_inline(source.value, rules, config, cwd)
             continue
         path = os.path.join(cwd or os.getcwd(), os.path.expanduser(source.value))
         try:
@@ -188,6 +195,16 @@ def classify_command(command: str, rules: dict | None = None, config: dict | Non
         except (OSError, UnicodeDecodeError):
             pass  # a script we can't read is not ours to judge; the shell rules still apply
     return Result(max_level(i.level for i in items), items)
+
+
+def _classify_inline(code: str, rules: dict, config: dict | None, cwd: str | None) -> list[Classification]:
+    """Code from `python -c` or a heredoc next to a Python interpreter. If it isn't Python after all (say
+    `python3 -V; bash <<EOF`), read it as shell, so a heredoc can't hide `aws` calls."""
+    try:
+        compile(code, "<script>", "exec", flags=ast.PyCF_ONLY_AST | ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+    except (SyntaxError, ValueError):
+        return classify_command(code, rules, config, cwd).items
+    return classify_python(code, rules, config).items
 
 
 def _worst_conditional_level(rules: dict, config: dict | None, service: str | None, operation: str | None) -> str:

@@ -26,7 +26,7 @@ Depending on the agent, approval is either a permission prompt or happens in cha
 
 Never type the approval phrase yourself, for example in a command or a file. It only counts when it comes from the user's own message. Don't rewrite the call to dodge the check. If the user wants a cheaper variant instead, run that one; it gets its own classification.
 
-If the message has no approval code (Claude Code), approval is the permission prompt itself. In a non-interactive run nobody can answer it, so the call is denied. Report the cost and stop; don't suggest raising thresholds or editing `.costaware.json` to push a single call through.
+If the message has no approval code (Claude Code), approval is the permission prompt itself. In a non-interactive run nobody can answer it, so the call is denied. Report the cost and stop; don't suggest raising thresholds or editing costaware's config to push a single call through.
 
 ## Before a HIGH or UNKNOWN call
 
@@ -119,10 +119,10 @@ Most `describe-*`/`list-*`/`get-*` calls, and all IAM and STS calls, really are 
 
 ## Configuration
 
-Thresholds live in `.costaware.json` at the project root (or a file named by `COSTAWARE_CONFIG`):
+Thresholds live in the user's `~/.config/costaware/config.json` (or a file named by `COSTAWARE_CONFIG`). A `.costaware.json` at the project root can only make them stricter:
 
 ```json
 {"high_monthly_usd": 1.0, "high_one_time_usd": 1.0, "unknown_service_read": "UNKNOWN"}
 ```
 
-Thresholds are the user's standing policy, not a way to get one call through. Only if the user says the prompts are too frequent in general, suggest raising `high_monthly_usd` or setting `unknown_service_read` to `"LOW"` rather than disabling the hook.
+Thresholds are the user's standing policy, not a way to get one call through. Never edit these files yourself. Only if the user says the prompts are too frequent in general, suggest that they raise `high_monthly_usd` or set `unknown_service_read` to `"LOW"` in their user-level file, rather than disabling the hook.
