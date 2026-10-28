@@ -33,7 +33,8 @@ class BashHookTest(unittest.TestCase):
     def test_high_asks_with_cost_in_reason(self):
         response = run(bash("aws ec2 create-nat-gateway --subnet-id s-1"), {})
         self.assertEqual(decision(response), "ask")
-        self.assertIn("~$32.85/month", response["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("ec2 create-nat-gateway · recurring cost\n  Billed hourly while it exists",
+                      response["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_unknown_asks(self):
         self.assertEqual(decision(run(bash("aws athena start-query-execution --query-string 'SELECT 1'"), {})), "ask")
@@ -87,7 +88,7 @@ class McpHookTest(unittest.TestCase):
         self.assertNotIn("line 3", reason)
         code += '\nec2.allocate_address()'
         reason = run(mcp("mcp__aws-mcp__aws___run_script", code=code), {})["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("ec2 create-nat-gateway · recurring cost · ~$32.85/month (line 3)", reason)
+        self.assertIn("ec2 create-nat-gateway · recurring cost (line 3)", reason)
         self.assertIn("(line 4)", reason)
 
     def test_prompt_shows_code_of_unresolved_calls(self):
@@ -114,13 +115,6 @@ class McpHookTest(unittest.TestCase):
 
 
 class ConfigTest(unittest.TestCase):
-    def test_env_config_changes_threshold(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp, "config.json")
-            path.write_text(json.dumps({"high_monthly_usd": 5.0}))
-            response = run(bash("aws ec2 allocate-address"), {"COSTAWARE_CONFIG": str(path)})
-        self.assertNotIn("permissionDecision", response["hookSpecificOutput"])
-
     def test_user_config_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "costaware").mkdir()
@@ -178,7 +172,7 @@ class AntigravityHookTest(unittest.TestCase):
         command = "aws ec2 create-nat-gateway --subnet-id s"
         response = run(antigravity("run_command", CommandLine=command), {})
         self.assertEqual(response["decision"], "deny")
-        self.assertIn("~$32.85/month", response["reason"])
+        self.assertIn("ec2 create-nat-gateway · recurring cost", response["reason"])
         code = approval_code(response["reason"])
         approved = run(antigravity("run_command", CommandLine=command, user_input=f"ok, costaware approve {code}"), {})
         self.assertEqual(approved["decision"], "auto_approve")

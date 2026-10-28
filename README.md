@@ -5,9 +5,11 @@ A pre-execution cost gate for AI coding agents working on AWS. It classifies the
 | Level | Meaning | What happens |
 |---|---|---|
 | `FREE` | No charge | The call runs |
-| `LOW` | Small per-request fee, or a resource that costs ~$0 while idle | The call runs; the agent mentions the cost |
-| `HIGH` | Costs money while idle (above the threshold), or a large one-time fee | The call waits for the user's approval |
+| `LOW` | Per-request or pay-per-use fee, or a resource whose looked-up idle cost is below the threshold | The call runs; the agent mentions the cost |
+| `HIGH` | Costs money while idle (at or above the threshold, or no price found), or a one-time fee | The call waits for the user's approval |
 | `UNKNOWN` | Size-dependent (Athena, DynamoDB scan, Logs Insights...) or no rule | The call waits for the user's approval |
+
+No prices are written into costaware: they come from the AWS Price List API when a call is checked (see [Price lookup](#price-lookup)).
 
 The product is Cloud Costaware; the package, CLI command, plugin and skill are all named `costaware`. It ships as a Python package with a CLI, plus a `PreToolUse` hook and a skill for three coding agents: **Claude Code**, **Antigravity CLI** (the successor of Gemini CLI) and **Codex CLI**. It works alongside the AWS MCP server you already use; there is no extra MCP server to run. See [RESEARCH.md](RESEARCH.md) for the background.
 
@@ -133,7 +135,8 @@ costaware classify 'aws s3 sync s3://bucket/data ./data && aws sts get-caller-id
 Result: UNKNOWN
   UNKNOWN aws s3 sync s3://bucket/data ./data
           s3 sync · size-dependent, no estimate
-          Data transfer to the internet ~$0.09/GB (first 100GB/month free) + GET requests. ...
+          Price List (on-demand, us-east-1, region not given): $0.09/GB to the internet + $0.0004/1,000 GET requests
+          Data transfer to the internet per GB (a monthly free allowance applies) + GET requests. ...
   FREE    aws sts get-caller-identity
           sts get-caller-identity · free
 ```
@@ -164,9 +167,9 @@ The rules live in [`src/costaware/rules/aws.json`](src/costaware/rules/aws.json)
 |---|---|
 | `free` | FREE |
 | `request`, `usage` | LOW |
-| `recurring` | LOW if `monthly_usd` is below the threshold, HIGH if at/above or unknown |
-| `one_time` | LOW if `usd` is below the threshold, HIGH if at/above or unknown |
-| `variable` | UNKNOWN (will become a number once estimators exist) |
+| `recurring` | HIGH, or LOW once its looked-up idle monthly cost is below the threshold |
+| `one_time` | HIGH |
+| `variable` | UNKNOWN; the confirmation shows the unit price (per TB scanned, per GB) |
 
 Rules can look at arguments:
 - `--dry-run` makes any EC2 call FREE.
@@ -181,7 +184,25 @@ Match order:
 3. the service's `default_read`/`default_write`
 4. UNKNOWN
 
-Prices are approximate us-east-1 list prices. Rules with `confidence: "low"` need verification.
+A rule holds no price, only how to find it. Its `price` is an estimator that reads the call's arguments (`ec2`, `ebs`, `rds`), or a list of Price List queries:
+
+```json
+{"op": "create-nat-gateway", "cost": "recurring",
+ "price": [
+   {"service": "AmazonEC2", "filters": {"productFamily": "NAT Gateway", "operation": "NatGateway", "usagetype": "~NatGateway-Hours"},
+    "per": "hour", "idle": "hour"},
+   {"service": "AmazonEC2", "filters": {"productFamily": "NAT Gateway", "operation": "NatGateway", "usagetype": "~NatGateway-Bytes"},
+    "per": "GB processed"}]}
+```
+
+- `filters` are Price List attributes; `~` matches a substring, since usage types carry a region prefix (`EUC1-NatGateway-Hours`). The priced region is added as `regionCode` (or `region_field`) unless the component is `global`.
+- `per` is the unit shown, and `scale` multiplies the unit price to match it (`"per": "1,000 requests", "scale": 1000`).
+- `idle` (`"hour"` or `"month"`) marks what bills while the resource exists. These add up to the idle monthly cost that decides HIGH or LOW. `count` names an argument whose values multiply it (one interface endpoint per subnet).
+- `exclude` drops products the API can't filter out, by attribute substring (FIFO queues).
+
+Adding a priced resource means adding a component, not code. `COSTAWARE_LIVE_PRICES=1 PYTHONPATH=src python3 -m unittest tests.test_price_specs_live` checks that every component matches exactly one price in us-east-1 and eu-central-1; run it when AWS renames a usage type.
+
+Rules with `confidence: "low"` need verification.
 
 ## Configuration
 
@@ -190,18 +211,14 @@ The CLI takes `--config settings.json`. The hook reads the user's config from `C
 ```json
 {
   "high_monthly_usd": 1.0,
-  "high_one_time_usd": 1.0,
   "unknown_service_read": "UNKNOWN",
   "price_lookup": true
 }
 ```
 
-- `high_monthly_usd`: idle monthly cost at or above this is HIGH. With the default of $1:
-  - HIGH: KMS key ($1), Elastic IP (~$3.65), dashboard ($3)
-  - LOW: alarm ($0.10), secret ($0.40)
-- `high_one_time_usd`: one-time cost at or above this is HIGH.
+- `high_monthly_usd`: a resource whose looked-up idle monthly cost is below this is LOW; at or above it, or when no price was found, HIGH. With the default of $1 a CloudWatch alarm or a secret runs, while a KMS key, an Elastic IP or a NAT Gateway asks.
 - `unknown_service_read`: level for `describe-`/`list-`/`get-` calls of services missing from the rule table. The safe default is `UNKNOWN`. Set it to `LOW` if it asks too often.
-- `price_lookup`: look up list prices for the confirmation (see below). Only the user-level file can change it.
+- `price_lookup`: look up list prices (see below). Without them every recurring cost is HIGH. Only the user-level file can change it.
 
 A `.costaware.json` in the project root is applied on top, but only where it makes the gate stricter (lower thresholds, a stricter `unknown_service_read`). The agent can write to its workspace, so a project file must not be able to switch the gate off; loosening it takes the user-level file.
 
@@ -209,7 +226,7 @@ The hook also honours `COSTAWARE_RULES` to point at an alternative rule table.
 
 ### Price lookup
 
-For a HIGH or UNKNOWN call whose price depends on its arguments, the hook asks the AWS Price List API for the on-demand list price and adds it to the confirmation:
+For every call that isn't free and whose rule has a `price`, the hook (and `costaware classify`) asks the AWS Price List API for the on-demand list price. It is shown in the confirmation, and in the context of LOW calls:
 
 ```
 - [HIGH] ec2 run-instances · recurring cost · eu-central-1
@@ -217,10 +234,11 @@ For a HIGH or UNKNOWN call whose price depends on its arguments, the hook asks t
   Price List (on-demand Linux, eu-central-1): $0.46/hour → ~$336/month + EBS 30 GB gp3 ~$2.86/month
 ```
 
-- Covered: `ec2 run-instances` (instance type × count, plus EBS volumes in `--block-device-mappings` that state size and type), `ec2 create-volume`, and `rds create-db-instance` for PostgreSQL, MySQL and MariaDB (instance hours only).
+- Covered: the rule table's components (NAT Gateway, Elastic IP, VPC endpoints, Transit Gateway, VPN, load balancers, EKS, KMS, Secrets Manager, CloudWatch, Route 53, S3 requests and transfer, Athena, Glue, DynamoDB, Lambda, SQS, SNS, Fargate, ECR...), plus `ec2 run-instances` (instance type × count, and EBS volumes in `--block-device-mappings` that state size and type), `ec2 create-volume`, and `rds create-db-instance` for PostgreSQL, MySQL and MariaDB (instance hours only).
 - It runs `aws pricing get-products` with the local AWS CLI and your credentials. The API is free and needs `pricing:GetProducts`.
 - Results are cached for a day in `~/.cache/costaware/prices/` (override with `COSTAWARE_CACHE_DIR`). Each query has a 6-second timeout, and queries run at the same time.
-- The price is never used to lower the level. If the CLI is missing, credentials or network are unavailable, a query times out or several products match, the line is left out.
+- A price lowers a recurring cost to LOW only when every part of its idle cost was found and the total is below `high_monthly_usd`. An instance's root volume and an RDS instance's storage aren't priced, so those never drop. If the CLI is missing, credentials or network are unavailable, a query times out, or several products match (or more than one page does), the line is left out and the call stays HIGH. A tiered price counts at its highest tier.
+- `costaware classify --no-price` skips the lookup.
 - The figure is the on-demand list price: Spot, Reserved Instances and Savings Plans aren't included, and the AMI's OS (Windows, RHEL) can change the EC2 price. When a call doesn't name a region, `AWS_REGION`/`AWS_DEFAULT_REGION` is used, else us-east-1 (and the line says so).
 
 ## Layout

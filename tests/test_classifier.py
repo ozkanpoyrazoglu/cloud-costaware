@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from costaware.classifier import classify_command, classify_operation, load_rules
@@ -57,21 +58,23 @@ class ClassifyCommandTest(unittest.TestCase):
     def test_dry_run_is_free(self):
         self.assertEqual(level("aws ec2 run-instances --image-id ami-1 --dry-run"), "FREE")
 
-    def test_small_recurring_cost_is_low_under_threshold(self):
-        self.assertEqual(level("aws cloudwatch put-metric-alarm --alarm-name a"), "LOW")
-        self.assertEqual(level("aws secretsmanager create-secret --name s"), "LOW")
+    def test_recurring_cost_is_high_until_a_price_says_otherwise(self):
+        # The rule table holds no prices; a looked-up price can lower these to LOW (see test_pricing).
+        self.assertEqual(level("aws cloudwatch put-metric-alarm --alarm-name a"), "HIGH")
+        self.assertEqual(level("aws secretsmanager create-secret --name s"), "HIGH")
         self.assertEqual(level("aws cloudwatch put-dashboard --dashboard-name d"), "HIGH")
 
-    def test_threshold_is_configurable(self):
-        self.assertEqual(level("aws ec2 allocate-address", high_monthly_usd=5.0), "LOW")
-        self.assertEqual(level("aws cloudwatch put-metric-alarm --alarm-name a", high_monthly_usd=0.05), "HIGH")
+    def test_no_rule_holds_a_price(self):
+        rules = json.dumps(load_rules()["services"])
+        self.assertNotIn("monthly_usd", rules)
+        self.assertNotRegex(rules, r"\$\d")
 
     def test_argument_aware_rules(self):
         self.assertEqual(level("aws dynamodb create-table --table-name t --billing-mode PAY_PER_REQUEST"), "LOW")
         self.assertEqual(level("aws dynamodb create-table --table-name t"), "HIGH")
         self.assertEqual(level("aws ec2 create-vpc-endpoint --vpc-id v --service-name com.amazonaws.us-east-1.s3"), "FREE")
         self.assertEqual(level("aws ec2 create-vpc-endpoint --vpc-endpoint-type Interface --vpc-id v"), "HIGH")
-        self.assertEqual(level("aws ssm put-parameter --name p --value v --tier Advanced"), "LOW")
+        self.assertEqual(level("aws ssm put-parameter --name p --value v --tier Advanced"), "HIGH")
         self.assertEqual(level("aws ssm put-parameter --name p --value v"), "FREE")
 
     def test_s3_transfer_direction(self):

@@ -13,20 +13,18 @@ from pathlib import Path
 
 from .parser import (CLI_WORD, S3_HIGH_LEVEL, AwsCall, ParseError, argument_fields, find_aws_calls,
                      find_python_sources, split_heredocs, to_cli_name)
-from .pricing import price_inputs
+from .pricing import annotate, price_inputs
 from .pyscan import find_boto3_calls
 
 # Severity order used when several calls are combined into one decision.
 LEVELS = ("FREE", "LOW", "UNKNOWN", "HIGH")
 
 DEFAULT_CONFIG = {
-    # Recurring cost at or above this (USD/month, while idle) is HIGH, below is LOW.
+    # A resource whose looked-up idle cost (USD/month) is below this is LOW; at or above it, or without a price, HIGH.
     "high_monthly_usd": 1.0,
-    # One-time cost at or above this (USD) is HIGH, below is LOW.
-    "high_one_time_usd": 1.0,
     # Level for read operations (describe-/list-/get-...) of services missing from the rule table.
     "unknown_service_read": "UNKNOWN",
-    # Look up on-demand prices with the local AWS CLI (Price List API) for the confirmation prompt.
+    # Look up on-demand prices with the local AWS CLI (Price List API). Without them recurring costs are HIGH.
     "price_lookup": True,
 }
 
@@ -50,8 +48,7 @@ class Classification:
     service: str | None
     operation: str | None
     note: str = ""
-    monthly_usd: float | None = None
-    usd: float | None = None
+    monthly_usd: float | None = None  # idle monthly cost from the Price List, set by apply_prices
     region: str | None = None
     rule: str = ""
     confidence: str = "high"
@@ -59,7 +56,7 @@ class Classification:
     details: list[str] = field(default_factory=list)  # cost-relevant arguments, e.g. "instance-type=m5.2xlarge"
     location: str = ""  # where the call is in a script, e.g. "line 3"
     pricing: dict = field(default_factory=dict)  # what the rule's price estimator needs (see pricing.py)
-    price: str = ""  # the looked-up list price, set by the hook
+    price: str = ""  # the looked-up list price, set by apply_prices
 
 
 @dataclass
@@ -112,17 +109,15 @@ def _as_lower_list(value) -> list[str]:
     return [v.lower() for v in (value if isinstance(value, list) else [value])]
 
 
-def _level_for(cost: str, rule: dict, config: dict) -> str:
+def _level_for(cost: str) -> str:
+    """The level before prices are known. A recurring cost is HIGH until a looked-up price says otherwise
+    (see apply_prices)."""
     if cost == "free":
         return "FREE"
     if cost in ("request", "usage"):
         return "LOW"
-    if cost == "recurring":
-        monthly = rule.get("monthly_usd")
-        return "HIGH" if monthly is None or monthly >= config["high_monthly_usd"] else "LOW"
-    if cost == "one_time":
-        usd = rule.get("usd")
-        return "HIGH" if usd is None or usd >= config["high_one_time_usd"] else "LOW"
+    if cost in ("recurring", "one_time"):
+        return "HIGH"
     return "UNKNOWN"  # "variable" and anything unrecognised
 
 
@@ -151,13 +146,11 @@ def _details(call: AwsCall, show: list[str]) -> list[str]:
 def _from_rule(call: AwsCall, rule: dict, rule_name: str, config: dict) -> Classification:
     cost = rule.get("cost", "variable")
     return Classification(
-        level=_level_for(cost, rule, config),
+        level=_level_for(cost),
         cost=cost,
         service=call.service,
         operation=call.operation,
         note=rule.get("note", ""),
-        monthly_usd=rule.get("monthly_usd"),
-        usd=rule.get("usd"),
         region=call.region,
         rule=rule_name,
         confidence=rule.get("confidence", "high"),
@@ -266,9 +259,8 @@ def _shell_view(code: str, rules: dict, config: dict | None) -> list[Classificat
 
 def _worst_conditional_level(rules: dict, config: dict | None, service: str | None, operation: str | None) -> str:
     """Highest level an argument-dependent rule for this operation can produce ("FREE" if there is none)."""
-    config = {**DEFAULT_CONFIG, **(config or {})}
     call = AwsCall(service, operation)
-    levels = [_level_for(rule.get("cost", "variable"), rule, config)
+    levels = [_level_for(rule.get("cost", "variable"))
               for rule in rules["services"].get(service or "", {}).get("rules", [])
               if rule.get("when") and _matches({**rule, "when": {}}, call)]
     return max_level(levels)
@@ -331,3 +323,15 @@ def classify_operation(service: str, operation: str, params: dict | None = None,
     call = AwsCall(service, operation, options, raw=f"{service} {operation}")
     item = classify_call(call, rules, config)
     return Result(item.level, [item])
+
+
+def apply_prices(result: Result, env: dict, config: dict | None = None) -> Result:
+    """Look up the list prices of the costly calls (see pricing.py) and lower a recurring cost to LOW when its
+    whole idle monthly cost was found and is below `high_monthly_usd`. A missing price keeps it HIGH."""
+    config = {**DEFAULT_CONFIG, **(config or {})}
+    annotate([item for item in result.items if item.level != "FREE"], env)
+    for item in result.items:
+        if (item.cost == "recurring" and item.level == "HIGH" and item.confidence == "high"
+                and item.monthly_usd is not None and item.monthly_usd < config["high_monthly_usd"]):
+            item.level = "LOW"
+    return Result(max_level(i.level for i in result.items), result.items)

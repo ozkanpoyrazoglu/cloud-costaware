@@ -26,10 +26,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .classifier import (DEFAULT_CONFIG, LEVELS, Classification, Result, classify_command, classify_operation,
-                         classify_python, load_rules, max_level)
+from .classifier import (DEFAULT_CONFIG, LEVELS, Classification, Result, apply_prices, classify_command,
+                         classify_operation, classify_python, load_rules, max_level)
 from .parser import is_plain_aws
-from .pricing import annotate
 from .report import headline
 
 ASK_LEVELS = {"HIGH", "UNKNOWN"}
@@ -57,9 +56,8 @@ def user_config_path(env: dict) -> Path:
 def _stricter(base: dict, project: dict) -> dict:
     """Apply only the project settings that make the gate stricter."""
     config = dict(base)
-    for key in ("high_monthly_usd", "high_one_time_usd"):
-        if isinstance(project.get(key), (int, float)):
-            config[key] = min(config[key], project[key])
+    if isinstance(project.get("high_monthly_usd"), (int, float)):
+        config["high_monthly_usd"] = min(config["high_monthly_usd"], project["high_monthly_usd"])
     level = project.get("unknown_service_read")
     if level in LEVELS and LEVELS.index(level) > LEVELS.index(config["unknown_service_read"]):
         config["unknown_service_read"] = level
@@ -226,8 +224,8 @@ def classify_tool_call(call: ToolCall, env: dict) -> Result:
         result = classify_mcp_input(call.name, call.input, rules, config)
     else:
         result = Result("FREE")
-    if config.get("price_lookup") is True and result.level in ASK_LEVELS:
-        annotate(result.items, env)
+    if config.get("price_lookup") is True:
+        result = apply_prices(result, env, config)
     if touches_approvals(call, env):
         item = Classification("HIGH", "unknown", None, None, rule="approval-state", command="<tool call>",
                               note="The call touches costaware's approvals. Only the user can approve a call.")

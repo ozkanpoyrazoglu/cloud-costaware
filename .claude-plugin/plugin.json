@@ -1,6 +1,6 @@
 {
   "name": "costaware",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Cloud Costaware for AWS. Classifies AWS CLI commands and AWS MCP calls by cost before they run, and asks for confirmation on expensive or size-dependent ones.",
   "keywords": [
     "aws",

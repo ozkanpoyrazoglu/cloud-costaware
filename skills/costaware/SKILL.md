@@ -10,11 +10,13 @@ A `PreToolUse` hook classifies AWS calls before they run: `aws ...` shell comman
 | Level | Meaning | What happens | What you do |
 |---|---|---|---|
 | `FREE` | No charge | Nothing, the call runs | Carry on, don't mention cost |
-| `LOW` | Small per-request fee, or a resource that costs ~$0 while idle | Call runs; a `costaware: LOW` note is added to your context | Mention the cost in one short line, carry on |
-| `HIGH` | Costs money while idle above the threshold, or a large one-time fee | The call waits for the user's approval | Explain the cost **before** the call (see below) |
+| `LOW` | Per-request or pay-per-use fee, or a resource whose looked-up idle cost is below the threshold | Call runs; a `costaware: LOW` note is added to your context | Mention the cost in one short line, carry on |
+| `HIGH` | Costs money while idle (at or above the threshold, or no price was found), or a one-time fee | The call waits for the user's approval | Explain the cost **before** the call (see below) |
 | `UNKNOWN` | Size-dependent (Athena, DynamoDB scan, Logs Insights, S3 download...) or no rule | The call waits for the user's approval | Estimate the size first if you can, then explain |
 
 The hook is the enforcement. Your job is to make the user's decision an informed one and to avoid surprising them.
+
+costaware holds no prices. When it can, the hook looks the on-demand list price up in the AWS Price List API and adds a `Price List (...)` line to its message. Quote that line; when it is missing, look the price up yourself (below). Never quote prices from memory: they differ by region and change over time.
 
 ## When a call is stopped with an approval code
 
@@ -33,31 +35,31 @@ If the message has no approval code (Claude Code), approval is the permission pr
 Say what it will cost before the call triggers the prompt, so the confirmation dialog is not the first time the user hears about it. Keep it short:
 
 ```
-This creates a NAT Gateway in eu-west-1:
-  ~$0.045/hour → ~$33/month while it exists, plus $0.045/GB processed.
+This creates a NAT Gateway in eu-central-1 (Price List, on-demand):
+  $<hourly>/hour → ~$<monthly>/month while it exists, plus $<per-GB>/GB processed.
   It keeps billing until deleted: aws ec2 delete-nat-gateway --nat-gateway-id <id>
 ```
 
 Rules for the estimate:
 
-- **Recurring resources: give hourly and monthly** (`~$0.045/hour, ~$33/month`). Say "while it exists", not "now". Monthly = hourly × 730.
-- **Usage-based costs: give a range or a per-unit price**, not a single number (`$5/TB scanned; this table is ~40GB → ~$0.20`).
-- **Name the hidden costs** that come with the resource:
-  - EC2: EBS volumes (billed even when stopped), public IPv4 ($3.65/month each), snapshots.
-  - Private subnets: NAT Gateway (~$33/month each, often one per AZ).
+- **Recurring resources: give hourly and monthly** (`$<hourly>/hour → ~$<monthly>/month`). Say "while it exists", not "now". Monthly = hourly × 730.
+- **Usage-based costs: give a range or a per-unit price**, not a single number (`$<per-TB>/TB scanned; this table is ~40GB → ~$<estimate>`).
+- **Name the hidden costs** that come with the resource, and price them the same way:
+  - EC2: EBS volumes (billed even when stopped), a public IPv4 address each, snapshots.
+  - Private subnets: a NAT Gateway, often one per AZ.
   - RDS: Multi-AZ doubles the price; storage and backups are billed separately.
-  - EKS: the control plane is $73/month before any node.
-  - Interface VPC endpoints: ~$7.3/month per AZ.
+  - EKS: the control plane is billed hourly before any node.
+  - Interface VPC endpoints: billed per AZ.
   - CloudWatch Logs: retention defaults to forever.
-- **Region matters.** Prices in the rule table are us-east-1; other regions are often 5-20% higher. Look up the real price (below) instead of guessing.
+- **Region matters.** Price the region the call targets, not us-east-1.
 - **Say how to undo it** (the delete/stop command) when the resource keeps billing.
 - If several costly resources are planned (e.g. "set up a VPC with an ALB and RDS"), give one total up front instead of surprising the user call by call.
 
 ### Looking up the price
 
-For EC2 instances, EBS volumes and RDS instances (PostgreSQL, MySQL, MariaDB) the hook looks the price up itself and adds a `Price List (...)` line to the confirmation; your figure should agree with it. You still say the cost first, since the line is left out when the lookup fails.
+The hook prices most resources itself (EC2 and RDS instances, EBS, NAT Gateway, Elastic IP, VPC endpoints, load balancers, EKS, KMS, Secrets Manager, CloudWatch, Athena, S3, DynamoDB, Lambda...) and adds a `Price List (...)` line; your figure should agree with it. You still say the cost first, since the line is left out when the lookup fails.
 
-When the price depends on an instance type, node type or volume type, get it from the Price List API rather than from memory. `pricing get-products` is free and the gate lets it through. The API is served from `us-east-1` (also `eu-central-1`, `ap-south-1`); `regionCode` selects the region being priced.
+For anything else (another instance or node type, ElastiCache, OpenSearch, Redshift, SageMaker, a missing line), get the price from the Price List API. `pricing get-products` is free and the gate lets it through. The API is served from `us-east-1` (also `eu-central-1`, `ap-south-1`); `regionCode` selects the region being priced. Usage types carry a region prefix (`EUC1-NatGateway-Hours`), so match them with `Type=CONTAINS`.
 
 ```bash
 # EC2 on-demand Linux, per hour. Without tenancy/preInstalledSw/capacitystatus/licenseModel you get many products.
@@ -92,13 +94,15 @@ When the user declines, don't retry the same call or route around the gate (e.g.
 
 These calls are billed by data volume. Free, read-only calls usually give the size:
 
-| Call | How to size it (free calls) | Price |
+| Call | How to size it (free calls) | Billed by |
 |---|---|---|
-| `athena start-query-execution` | `glue get-table` / `get-partitions` for the S3 location, then `aws s3 ls --summarize --recursive` on the partitions the `WHERE` clause hits. Columnar formats (Parquet/ORC) only read selected columns. **Never use `EXPLAIN ANALYZE`, it runs the query.** | $5/TB scanned, 10MB minimum |
-| `dynamodb scan` | `dynamodb describe-table` → `TableSizeBytes` | ~$0.125 per 1M RRU (4KB each, 8KB eventually consistent) |
-| `logs start-query` | `logs describe-log-groups` → `storedBytes` (upper bound) | $0.005/GB scanned |
-| `s3 cp/sync` download | `aws s3 ls --summarize --recursive s3://...` | ~$0.09/GB to the internet; free to EC2 in the same region |
+| `athena start-query-execution` | `glue get-table` / `get-partitions` for the S3 location, then `aws s3 ls --summarize --recursive` on the partitions the `WHERE` clause hits. Columnar formats (Parquet/ORC) only read selected columns. **Never use `EXPLAIN ANALYZE`, it runs the query.** | TB scanned, 10MB minimum per query |
+| `dynamodb scan` | `dynamodb describe-table` → `TableSizeBytes` | read request units (4KB each, 8KB eventually consistent) |
+| `logs start-query` | `logs describe-log-groups` → `storedBytes` (upper bound) | GB scanned |
+| `s3 cp/sync` download | `aws s3 ls --summarize --recursive s3://...` | GB to the internet; free to EC2 in the same region |
 | `cloudformation deploy` | Read the template and list the resources that cost money | sum of resources |
+
+Multiply the size by the unit price in the `Price List (...)` line.
 
 Note that `s3 ls --recursive` is itself a LOW call (a LIST request per 1,000 objects); that is fine for sizing.
 
@@ -139,8 +143,8 @@ Anything the gate can't resolve is UNKNOWN, which means the user gets asked. Tha
 
 ## Things that look free but aren't
 
-- Cost Explorer API (`aws ce ...`): $0.01 per request, every page.
-- CloudWatch `get-metric-data`: $0.01 per 1,000 metrics, no free tier.
+- Cost Explorer API (`aws ce ...`): every request is billed, every page.
+- CloudWatch `get-metric-data`: billed per metric requested, no free tier.
 - SQS: every API call, including `receive-message` polling, is billed.
 - Deleting from S3 Glacier/IA early incurs a minimum-duration charge.
 
@@ -151,7 +155,7 @@ Most `describe-*`/`list-*`/`get-*` calls, and all IAM and STS calls, really are 
 Thresholds live in the user's `~/.config/costaware/config.json` (or a file named by `COSTAWARE_CONFIG`). A `.costaware.json` at the project root can only make them stricter:
 
 ```json
-{"high_monthly_usd": 1.0, "high_one_time_usd": 1.0, "unknown_service_read": "UNKNOWN"}
+{"high_monthly_usd": 1.0, "unknown_service_read": "UNKNOWN"}
 ```
 
 Thresholds are the user's standing policy, not a way to get one call through. Never edit these files yourself. Only if the user says the prompts are too frequent in general, suggest that they raise `high_monthly_usd` or set `unknown_service_read` to `"LOW"` in their user-level file, rather than disabling the hook.

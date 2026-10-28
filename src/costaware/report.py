@@ -16,12 +16,8 @@ COST_LABELS = {
 
 
 def describe(item: Classification) -> str:
-    """One-line summary such as "ec2 create-nat-gateway · recurring cost · ~$32.85/month"."""
+    """One-line summary such as "ec2 create-nat-gateway · recurring cost · eu-central-1"."""
     detail = f"{item.service or '?'} {item.operation or '?'} · {COST_LABELS.get(item.cost, item.cost)}"
-    if item.monthly_usd is not None:
-        detail += f" · ~${item.monthly_usd:g}/month"
-    if item.usd is not None:
-        detail += f" · ~${item.usd:g}"
     if item.region:
         detail += f" · {item.region}"
     return detail

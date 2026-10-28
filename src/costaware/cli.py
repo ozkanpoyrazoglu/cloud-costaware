@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-from .classifier import classify_command, classify_operation, classify_python, load_rules
+from .classifier import DEFAULT_CONFIG, apply_prices, classify_command, classify_operation, classify_python, load_rules
 from .report import format_text
 
 def _key_value(text: str) -> tuple[str, object]:
@@ -35,6 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     classify.add_argument("--format", choices=["text", "json"], default="text")
     classify.add_argument("--rules", help="Alternative rule table (JSON).")
     classify.add_argument("--config", help="JSON file with threshold settings.")
+    classify.add_argument("--no-price", action="store_true",
+                          help="Don't look up prices (recurring costs then stay HIGH).")
 
     hook = sub.add_parser("hook", help="Run as a PreToolUse hook (payload on stdin).")
     hook.add_argument("--client", choices=["claude", "antigravity", "codex"],
@@ -59,6 +62,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         command = args.command if args.command not in (None, "-") else sys.stdin.read()
         result = classify_command(command, rules, config)
+
+    if not args.no_price and {**DEFAULT_CONFIG, **(config or {})}.get("price_lookup") is True:
+        result = apply_prices(result, dict(os.environ), config)
 
     if args.format == "json":
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
