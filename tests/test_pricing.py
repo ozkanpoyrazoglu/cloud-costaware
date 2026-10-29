@@ -225,6 +225,29 @@ class LevelFromPriceTest(unittest.TestCase):
         self.assertEqual(result.level, "UNKNOWN")
         self.assertEqual(result.items[0].price, "Price List (on-demand, eu-central-1): $5.00/TB scanned")
 
+    def test_arguments_the_price_leaves_out_keep_it_high(self):
+        with FakeAws() as aws:
+            for command in ("aws ec2 create-volume --size 1 --volume-type gp3 --availability-zone a --iops 16000",
+                            "aws ec2 create-volume --size 1 --volume-type gp3 --availability-zone a --throughput 1000",
+                            "aws cloudwatch put-metric-alarm --alarm-name a --period 10",
+                            "aws cloudwatch put-metric-alarm --alarm-name a --metrics file://m.json",
+                            "aws secretsmanager create-secret --name s --add-replica-regions Region=eu-west-1",
+                            "aws route53 create-health-check --caller-reference r --health-check-config Type=HTTPS"):
+                self.assertEqual(priced(command, aws.env, high_monthly_usd=10000).level, "HIGH", command)
+            self.assertEqual(priced("aws cloudwatch put-metric-alarm --alarm-name a --period 60", aws.env).level, "LOW")
+            result = priced("aws cloudwatch put-metric-alarm --alarm-name a --period 10 --region eu-central-1", aws.env)
+            self.assertEqual(result.items[0].price,
+                             "Price List (on-demand, some arguments not priced, eu-central-1): $0.1/month")
+
+    def test_a_bad_cache_entry_is_a_miss(self):
+        with FakeAws() as aws:
+            priced("aws ec2 allocate-address", aws.env)
+            for entry in Path(aws.env["COSTAWARE_CACHE_DIR"]).iterdir():
+                for usd in (-1, "0", float("nan"), True):
+                    entry.write_text(json.dumps({"time": 9e99, "usd": usd}))
+                    self.assertEqual(priced("aws ec2 allocate-address", aws.env).items[0].price,
+                                     "Price List (on-demand, us-east-1, region not given): $0.005/hour → ~$3.65/month")
+
     def test_free_calls_are_not_looked_up(self):
         with FakeAws() as aws:
             priced("aws ec2 describe-instances", aws.env)
@@ -273,6 +296,12 @@ class HookPriceTest(unittest.TestCase):
             reason = run(self.command, aws.env)["hookSpecificOutput"]["permissionDecisionReason"]
             self.assertNotIn("Price List", reason)
             self.assertEqual(aws.calls, [])
+
+    def test_touching_the_price_cache_asks(self):
+        with FakeAws() as aws:
+            for command in ("echo '{}' > ~/.cache/costaware/prices/x.json", f"rm -r {aws.env['COSTAWARE_CACHE_DIR']}"):
+                payload = {**self.command, "tool_input": {"command": command}}
+                self.assertEqual(run(payload, aws.env)["hookSpecificOutput"]["permissionDecision"], "ask", command)
 
     def test_project_config_cannot_turn_it_off(self):
         with FakeAws() as aws, tempfile.TemporaryDirectory() as project:

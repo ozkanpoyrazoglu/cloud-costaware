@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import subprocess
 import time
@@ -168,8 +169,10 @@ def _lookup(service_code: str, filters: dict, aws: str, env: dict, exclude=()) -
     path = _cache_dir(env) / (hashlib.sha256(key.encode()).hexdigest()[:24] + ".json")
     try:
         cached = json.loads(path.read_text(encoding="utf-8"))
-        if time.time() - cached["time"] < CACHE_SECONDS:
-            return cached["usd"]
+        usd = cached["usd"]
+        valid = usd is None or (type(usd) in (int, float) and math.isfinite(usd) and usd >= 0)
+        if valid and time.time() - cached["time"] < CACHE_SECONDS:
+            return usd
     except (OSError, ValueError, KeyError, TypeError):
         pass
     command = [aws, "pricing", "get-products", "--region", PRICING_REGION, "--service-code", service_code,
@@ -217,7 +220,7 @@ def _describe(inputs: dict, prices: dict[str, float | None]) -> tuple[list[str],
     """The price parts, what they're based on, and the idle monthly cost when it is complete."""
     if inputs["kind"] == "components":
         parts, monthly = _describe_components(inputs, prices)
-        return parts, "on-demand", monthly
+        return parts, "on-demand", (None if inputs.get("incomplete") else monthly)
     count = inputs.get("count", 1)
     parts = []
     if inputs["kind"] in ("ec2", "rds"):
@@ -238,7 +241,8 @@ def _describe(inputs: dict, prices: dict[str, float | None]) -> tuple[list[str],
     basis = {"ec2": "on-demand Linux", "rds": "on-demand, instance only", "ebs": "on-demand"}[inputs["kind"]]
     # An instance's root volume (from the AMI) and an RDS instance's storage aren't priced, so only a volume
     # on its own has a complete monthly figure.
-    monthly = storage if inputs["kind"] == "ebs" and not any(t in ("io1", "io2") for _, t in volumes) else None
+    complete = inputs["kind"] == "ebs" and not inputs.get("incomplete") and not any(t in ("io1", "io2") for _, t in volumes)
+    monthly = storage if complete else None
     return parts, basis, monthly
 
 
@@ -271,6 +275,8 @@ def annotate(items, env: dict) -> None:
         prices = {name: results[json.dumps(query, sort_keys=True)]
                   for name, query in _queries(item.pricing, region).items()}
         parts, basis, monthly = _describe(item.pricing, prices)
+        if item.pricing.get("incomplete"):
+            basis += ", some arguments not priced"
         if parts:
             where = region if given else f"{region}, region not given"
             item.price = f"Price List ({basis}, {where}): {' + '.join(parts)}"

@@ -53,7 +53,8 @@
            {"service": "AmazonVPC", "filters": {"group": "VPCPublicIPv4Address", "usagetype": "~PublicIPv4:IdleAddress"},
             "per": "hour", "idle": "hour"}]},
         {"op": "create-volume", "cost": "recurring", "note": "EBS volumes are billed per GB-month, even when unattached.",
-         "price": "ebs", "show": ["--size", "--volume-type", "--iops", "--throughput"]},
+         "price": "ebs", "unpriced": {"--iops": true, "--throughput": true},
+         "show": ["--size", "--volume-type", "--iops", "--throughput"]},
         {"op": "modify-volume", "cost": "recurring", "note": "Increasing volume size/IOPS raises the monthly cost.",
          "show": ["--size", "--volume-type", "--iops", "--throughput"]},
         {"op": "modify-instance-attribute", "when": {"--instance-type": true}, "cost": "recurring",
@@ -351,7 +352,8 @@
            {"service": "AmazonCloudWatch", "filters": {"operation": "GetMetricWidgetImage", "usagetype": "~CW:GMWI-Metrics"},
             "per": "1,000 metrics", "scale": 1000}]},
         {"op": "put-metric-alarm", "cost": "recurring",
-         "note": "Billed monthly per alarm (high-resolution alarms cost more).",
+         "note": "Billed monthly per alarm metric; high-resolution, metric math and anomaly detection alarms cost more.",
+         "unpriced": {"--metrics": true, "--threshold-metric-id": true, "--period": ["10", "30"]},
          "price": [
            {"service": "AmazonCloudWatch", "filters": {"productFamily": "Alarm", "usagetype": "~CW:AlarmMonitorUsage"},
             "per": "month", "idle": "month"}]},
@@ -408,7 +410,8 @@
     "secretsmanager": {
       "rules": [
         {"op": ["create-secret", "replicate-secret-to-regions"], "cost": "recurring",
-         "note": "Billed monthly per secret (and per replica), plus API calls.",
+         "note": "Billed monthly per secret and per replica, plus API calls.",
+         "unpriced": {"--add-replica-regions": true},
          "price": [
            {"service": "AWSSecretsManager", "filters": {"productFamily": "Secret"}, "per": "month", "idle": "month"}]}
       ],
@@ -500,7 +503,8 @@
            {"service": "AmazonRoute53", "filters": {"productFamily": "DNS Zone", "usagetype": "HostedZone"},
             "global": true, "per": "month", "idle": "month"}]},
         {"op": "create-health-check", "cost": "recurring",
-         "note": "Billed monthly per health check (endpoints outside AWS cost more; this is that price).",
+         "note": "Billed monthly per health check; HTTPS, string matching, fast interval and latency measurement add to it.",
+         "unpriced": true,
          "price": [
            {"service": "AmazonRoute53", "filters": {"productFamily": "DNS Health Check", "usagetype": "Health-Check-Non-AWS"},
             "global": true, "per": "month", "idle": "month"}]}

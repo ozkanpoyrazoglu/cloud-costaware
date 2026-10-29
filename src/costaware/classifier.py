@@ -156,8 +156,19 @@ def _from_rule(call: AwsCall, rule: dict, rule_name: str, config: dict) -> Class
         confidence=rule.get("confidence", "high"),
         command=call.raw,
         details=_details(call, rule.get("show", [])),
-        pricing=price_inputs(rule.get("price"), call),
+        pricing=_price_inputs(rule, call),
     )
+
+
+def _price_inputs(rule: dict, call: AwsCall) -> dict:
+    """The rule's price inputs. A call with an argument the price leaves out (`unpriced`, in `when` syntax, any
+    one matching; or `true`) gets no complete monthly figure, so its level can't drop."""
+    inputs = price_inputs(rule.get("price"), call)
+    unpriced = rule.get("unpriced")
+    if inputs and (unpriced is True or any(_matches({"op": "*", "when": {key: expected}}, call)
+                                           for key, expected in (unpriced or {}).items())):
+        inputs["incomplete"] = True
+    return inputs
 
 
 def classify_call(call: AwsCall, rules: dict | None = None, config: dict | None = None) -> Classification:
@@ -329,7 +340,10 @@ def apply_prices(result: Result, env: dict, config: dict | None = None) -> Resul
     """Look up the list prices of the costly calls (see pricing.py) and lower a recurring cost to LOW when its
     whole idle monthly cost was found and is below `high_monthly_usd`. A missing price keeps it HIGH."""
     config = {**DEFAULT_CONFIG, **(config or {})}
-    annotate([item for item in result.items if item.level != "FREE"], env)
+    try:
+        annotate([item for item in result.items if item.level != "FREE"], env)
+    except Exception:  # a price is only ever a reason to lower the level, so without one nothing changes
+        return result
     for item in result.items:
         if (item.cost == "recurring" and item.level == "HIGH" and item.confidence == "high"
                 and item.monthly_usd is not None and item.monthly_usd < config["high_monthly_usd"]):

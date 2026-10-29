@@ -29,6 +29,7 @@ from pathlib import Path
 from .classifier import (DEFAULT_CONFIG, LEVELS, Classification, Result, apply_prices, classify_command,
                          classify_operation, classify_python, load_rules, max_level)
 from .parser import is_plain_aws
+from .pricing import _cache_dir
 from .report import headline
 
 ASK_LEVELS = {"HIGH", "UNKNOWN"}
@@ -207,11 +208,12 @@ def classify_mcp_input(tool_name: str, tool_input: dict, rules: dict, config: di
     return Result(max_level(i.level for i in items), items)
 
 
-def touches_approvals(call: ToolCall, env: dict) -> bool:
-    """Whether the call writes the approval phrase or reaches into the approval state (Codex reads approvals
-    from a file, so the agent must not create them itself)."""
+def touches_state(call: ToolCall, env: dict) -> bool:
+    """Whether the call writes the approval phrase or reaches into costaware's state: the approvals (Codex reads
+    them from a file, so the agent must not create them itself) and the price cache (a cached price can lower
+    the level)."""
     text = call.shell_command if call.shell_command is not None else json.dumps(call.input)
-    markers = ("costaware/approvals", str(approvals_path("", env).parent))
+    markers = ("costaware/approvals", str(approvals_path("", env).parent), "costaware/prices", str(_cache_dir(env)))
     return bool(APPROVAL.search(text)) or any(m in text for m in markers)
 
 
@@ -226,9 +228,10 @@ def classify_tool_call(call: ToolCall, env: dict) -> Result:
         result = Result("FREE")
     if config.get("price_lookup") is True:
         result = apply_prices(result, env, config)
-    if touches_approvals(call, env):
-        item = Classification("HIGH", "unknown", None, None, rule="approval-state", command="<tool call>",
-                              note="The call touches costaware's approvals. Only the user can approve a call.")
+    if touches_state(call, env):
+        item = Classification("HIGH", "unknown", None, None, rule="costaware-state", command="<tool call>",
+                              note="The call touches costaware's approvals or price cache. Only the user can approve"
+                                   " a call.")
         result = Result("HIGH", [*result.items, item])
     return result
 
